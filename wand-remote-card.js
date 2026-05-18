@@ -1,4 +1,4 @@
-const VERSION = "0.8.3";
+const VERSION = "0.8.5";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -337,7 +337,7 @@ class WandRemoteCard extends HTMLElement {
           </header>
 
           <section class="device-strip">${this._visibleDevices(room).map((item) => this._deviceButton(item)).join("")}</section>
-          ${device ? this._deviceHeader(device) : `<div class="empty">Add a device for ${this._escape(room.name)} in the visual editor.</div>`}
+          ${device ? this._deviceHeader(device) : `<div class="empty-message">Add a device for ${this._escape(room.name)} in the visual editor.</div>`}
           <section id="remote-host" class="remote-host">${device ? this._fallbackRemote(device) : ""}</section>
         `}
       </ha-card>
@@ -623,8 +623,9 @@ class WandRemoteCard extends HTMLElement {
 
     const platform = String(device.platform || device.name || "").toLowerCase();
     const candidates = [];
-    if (platform.includes("samsung")) candidates.push("KEY_HOME", "HOME");
-    else if (platform.includes("google") || platform.includes("android") || platform.includes("fire")) candidates.push("HOME", "KEYCODE_HOME");
+    if (platform.includes("tata")) return [];
+    if (platform.includes("samsung")) candidates.push("KEY_HOME");
+    else if (platform.includes("google") || platform.includes("android") || platform.includes("fire")) candidates.push("HOME");
     else if (platform.includes("apple")) candidates.push("home", "HOME");
     else if (platform.includes("roku")) candidates.push("home", "HOME");
     else candidates.push("home", "HOME", "KEY_HOME");
@@ -754,7 +755,7 @@ class WandRemoteCard extends HTMLElement {
       .action, .wide { min-width:52px; height:52px; border-radius:16px; display:grid; place-items:center; background:${theme.panel}; border:1px solid ${theme.border}; }
       .wide { padding:0 16px; }
       .fallback-note { color:${theme.muted}; font-size:12px; text-align:center; margin:6px 0 12px; }
-      .empty { padding:28px; text-align:center; color:${theme.muted}; border:1px dashed ${theme.border}; border-radius:18px; }
+      .empty-message { padding:28px; text-align:center; color:${theme.muted}; border:1px dashed ${theme.border}; border-radius:18px; }
       @media (max-width: 520px) {
         .wrap { padding:16px; border-radius:20px; }
         .control-header { grid-template-columns:auto 1fr; }
@@ -781,7 +782,9 @@ class WandRemoteCardEditor extends HTMLElement {
   }
 
   setConfig(config) {
-    this._config = { ...clone(DEFAULT_CONFIG), ...clone(config || {}) };
+    const nextConfig = { ...clone(DEFAULT_CONFIG), ...clone(config || {}) };
+    if (JSON.stringify(nextConfig) === JSON.stringify(this._config)) return;
+    this._config = nextConfig;
     this._render();
   }
 
@@ -944,7 +947,7 @@ class WandRemoteCardEditor extends HTMLElement {
     const rows = this._cardRows(device);
     const options = ["back", "power", "home", "menu", "touchpad", "volume_buttons", "rewind", "previous", "play_pause", "next", "fast_forward", "channel_up", "channel_down", "up", "down", "left", "right", "select", "n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8", "n9"];
     return `
-      <div class="rows-builder">
+      <div class="rows-builder" data-rows-builder>
         <div class="section-head">
           <strong>Remote buttons</strong>
           <button data-add-remote-row>Add row</button>
@@ -1061,11 +1064,7 @@ class WandRemoteCardEditor extends HTMLElement {
     this.shadowRoot.querySelectorAll("[data-device-json]").forEach((input) => input.addEventListener("change", () => this._updateJson(input)));
     this.shadowRoot.querySelectorAll("[data-action-script]").forEach((input) => input.addEventListener("change", () => this._updateScriptAction(input)));
     this.shadowRoot.querySelectorAll("[data-action-service],[data-action-target],[data-action-data]").forEach((input) => input.addEventListener("change", () => this._updateAction(input)));
-    this.shadowRoot.querySelectorAll("[data-remote-row-action]").forEach((input) => input.addEventListener("change", () => this._updateRemoteRowAction(input)));
-    this.shadowRoot.querySelectorAll("[data-add-remote-action]").forEach((button) => button.addEventListener("click", () => this._addRemoteAction(Number(button.dataset.addRemoteAction))));
-    this.shadowRoot.querySelectorAll("[data-remove-remote-action]").forEach((button) => button.addEventListener("click", () => this._removeRemoteAction(button.dataset.removeRemoteAction)));
-    this.shadowRoot.querySelector("[data-add-remote-row]")?.addEventListener("click", () => this._addRemoteRow());
-    this.shadowRoot.querySelectorAll("[data-remove-remote-row]").forEach((button) => button.addEventListener("click", () => this._removeRemoteRow(Number(button.dataset.removeRemoteRow))));
+    this._bindRowsEditor();
     this.shadowRoot.querySelector("[data-add-room]")?.addEventListener("click", () => this._addRoom());
     this.shadowRoot.querySelector("[data-remove-room]")?.addEventListener("click", () => this._removeRoom());
     this.shadowRoot.querySelector("[data-add-device]")?.addEventListener("click", () => this._addDevice());
@@ -1075,7 +1074,7 @@ class WandRemoteCardEditor extends HTMLElement {
       const device = this._device();
       device.power_entity = device.media_player_id || device.card_config?.media_player_id || "";
       this._syncDeviceCardConfig();
-      this._changed(true);
+      this._changed();
     });
   }
 
@@ -1085,6 +1084,23 @@ class WandRemoteCardEditor extends HTMLElement {
       const input = this.shadowRoot.querySelector(`[list="${list.id}"]`);
       list.innerHTML = this._entityOptions(input?.dataset.domain || "");
     });
+  }
+
+  _bindRowsEditor() {
+    this.shadowRoot.querySelectorAll("[data-remote-row-action]").forEach((input) => input.addEventListener("change", () => this._updateRemoteRowAction(input)));
+    this.shadowRoot.querySelectorAll("[data-add-remote-action]").forEach((button) => button.addEventListener("click", () => this._addRemoteAction(Number(button.dataset.addRemoteAction))));
+    this.shadowRoot.querySelectorAll("[data-remove-remote-action]").forEach((button) => button.addEventListener("click", () => this._removeRemoteAction(button.dataset.removeRemoteAction)));
+    this.shadowRoot.querySelector("[data-add-remote-row]")?.addEventListener("click", () => this._addRemoteRow());
+    this.shadowRoot.querySelectorAll("[data-remove-remote-row]").forEach((button) => button.addEventListener("click", () => this._removeRemoteRow(Number(button.dataset.removeRemoteRow))));
+  }
+
+  _refreshRowsEditor() {
+    const rowsBuilder = this.shadowRoot.querySelector("[data-rows-builder]");
+    if (!rowsBuilder) return;
+    const template = document.createElement("template");
+    template.innerHTML = this._rowsEditor(this._device()).trim();
+    rowsBuilder.replaceWith(template.content.firstElementChild);
+    this._bindRowsEditor();
   }
 
   _mountUniversalRemoteEditor(device) {
@@ -1161,7 +1177,8 @@ class WandRemoteCardEditor extends HTMLElement {
       rows
     };
     device.rows = rows;
-    this._changed(true);
+    this._changed();
+    this._refreshRowsEditor();
   }
 
   _updateRemoteRowAction(input) {
@@ -1217,7 +1234,7 @@ class WandRemoteCardEditor extends HTMLElement {
     const owner = path.owner === "room" ? this._room() : this._device();
     const entityId = input.value.trim();
     owner[path.field] = entityId ? { service: "script.turn_on", target: { entity_id: entityId } } : null;
-    this._changed(true);
+    this._changed();
   }
 
   _syncFromCardConfig(render = false) {
