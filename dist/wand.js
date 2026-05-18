@@ -1,4 +1,4 @@
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -13,6 +13,7 @@ const DEFAULT_CONFIG = {
   show_power_bar: true,
   show_entity_status: true,
   show_unavailable_devices: true,
+  persist_navigation: true,
   use_universal_remote_card: true,
   universal_remote_card_type: "custom:universal-remote-card",
   rooms: [
@@ -138,6 +139,7 @@ class WandRemoteCard extends HTMLElement {
     this._helpers = null;
     this._embeddedCard = null;
     this._embeddedSignature = "";
+    this._restoredSelection = false;
   }
 
   static getStubConfig() {
@@ -150,6 +152,7 @@ class WandRemoteCard extends HTMLElement {
 
   setConfig(config) {
     this._config = this._normalizeConfig(config);
+    this._restoreSelection();
     if (this._selectedRoom && !this._config.rooms?.some((room) => room.id === this._selectedRoom)) {
       this._selectedRoom = null;
       this._selectedDevice = null;
@@ -290,6 +293,7 @@ class WandRemoteCard extends HTMLElement {
         this._selectedRoom = button.dataset.room;
         this._selectedDevice = this._visibleDevices(this._currentRoom())?.[0]?.id;
         this._embeddedCard = null;
+        this._rememberSelection();
         this._render();
       });
     });
@@ -298,6 +302,7 @@ class WandRemoteCard extends HTMLElement {
       this._selectedRoom = null;
       this._selectedDevice = null;
       this._embeddedCard = null;
+      this._rememberSelection();
       this._render();
     });
 
@@ -305,6 +310,7 @@ class WandRemoteCard extends HTMLElement {
       button.addEventListener("click", async () => {
         this._selectedDevice = button.dataset.device;
         this._embeddedCard = null;
+        this._rememberSelection();
         await this._runAction(this._currentDevice()?.switch_action);
         this._render();
       });
@@ -331,6 +337,38 @@ class WandRemoteCard extends HTMLElement {
         ${(this._config.rooms || []).map((room) => this._areaCard(room)).join("")}
       </section>
     `;
+  }
+
+  _storageKey() {
+    const path = window.location?.pathname || "dashboard";
+    return `wand-remote-card:${path}:${this._config.title || "remote"}:selection`;
+  }
+
+  _restoreSelection() {
+    if (this._restoredSelection || !this._config.persist_navigation) return;
+    this._restoredSelection = true;
+    try {
+      const saved = JSON.parse(localStorage.getItem(this._storageKey()) || "{}");
+      if (saved.room && this._config.rooms?.some((room) => room.id === saved.room)) {
+        this._selectedRoom = saved.room;
+        const room = this._config.rooms.find((item) => item.id === saved.room);
+        this._selectedDevice = room?.devices?.some((device) => device.id === saved.device)
+          ? saved.device
+          : room?.devices?.[0]?.id;
+      }
+    } catch (err) {
+      this._selectedRoom = null;
+      this._selectedDevice = null;
+    }
+  }
+
+  _rememberSelection() {
+    if (!this._config.persist_navigation) return;
+    try {
+      localStorage.setItem(this._storageKey(), JSON.stringify({ room: this._selectedRoom, device: this._selectedDevice }));
+    } catch (err) {
+      // Ignore storage failures; navigation still works for the current session.
+    }
   }
 
   _areaCard(room) {
@@ -617,7 +655,7 @@ class WandRemoteCardEditor extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    this._renderEntityPickers();
+    this._refreshEntityLists();
   }
 
   _render() {
@@ -636,6 +674,7 @@ class WandRemoteCardEditor extends HTMLElement {
             ${this._toggle("show_power_bar", "Show room power")}
             ${this._toggle("show_entity_status", "Show status")}
             ${this._toggle("show_unavailable_devices", "Show unavailable devices")}
+            ${this._toggle("persist_navigation", "Remember selected area")}
           </div>
         </section>
 
@@ -660,7 +699,7 @@ class WandRemoteCardEditor extends HTMLElement {
     `;
 
     this._bindEvents();
-    this._renderEntityPickers();
+    this._refreshEntityLists();
   }
 
   _roomEditor(room) {
@@ -683,10 +722,16 @@ class WandRemoteCardEditor extends HTMLElement {
         <label>Name<input data-device="name" value="${this._escape(device.name || "")}"></label>
         <label>Icon<input data-device="icon" value="${this._escape(device.icon || "")}"></label>
         <label>Accent<input type="color" data-device="accent" value="${this._escape(device.accent || "#38bdf8")}"></label>
-        <label>Platform<input data-device="platform" value="${this._escape(device.platform || "")}" placeholder="Apple TV, Samsung TV, Denon AVR"></label>
+        <label>Platform<select data-device="platform">
+          ${["", "Apple TV", "Samsung TV", "Denon AVR", "Tata Play", "Google TV", "Fire TV", "Roku", "Kodi", "Android TV", "Generic"].map((name) => `<option value="${this._escape(name)}" ${device.platform === name ? "selected" : ""}>${this._escape(name || "Auto / custom")}</option>`).join("")}
+        </select></label>
         ${this._entityPicker("remote_id", "Remote entity", device.remote_id, "remote")}
         ${this._entityPicker("media_player_id", "Media player", device.media_player_id, "media_player")}
         ${this._entityPicker("power_entity", "Power/status entity", device.power_entity, "")}
+        <div class="quick-actions">
+          <button data-sync-card-config>Sync from card config</button>
+          <button data-use-media-power>Use media player for power</button>
+        </div>
         ${this._actionEditor("device-switch", "Run when selected", device.switch_action)}
         ${this._actionEditor("device-power-on", "Power on action", device.power_on_action)}
         ${this._actionEditor("device-power-off", "Power off action", device.power_off_action)}
@@ -698,11 +743,22 @@ class WandRemoteCardEditor extends HTMLElement {
   }
 
   _entityPicker(field, label, value, domain) {
+    const listId = `wand-${field}-${domain || "all"}`;
     return `
       <label>${this._escape(label)}
-        <div class="entity-picker" data-entity-field="${this._escape(field)}" data-domain="${this._escape(domain)}" data-value="${this._escape(value || "")}"></div>
+        <input data-entity-input="${this._escape(field)}" data-domain="${this._escape(domain)}" list="${listId}" value="${this._escape(value || "")}" placeholder="${this._escape(domain ? `${domain}.example` : "media_player.example")}">
+        <datalist id="${listId}">${this._entityOptions(domain)}</datalist>
       </label>
     `;
+  }
+
+  _entityOptions(domain) {
+    if (!this._hass?.states) return "";
+    return Object.keys(this._hass.states)
+      .filter((entityId) => !domain || entityId.startsWith(`${domain}.`))
+      .sort()
+      .map((entityId) => `<option value="${this._escape(entityId)}"></option>`)
+      .join("");
   }
 
   _actionEditor(kind, label, action) {
@@ -743,6 +799,7 @@ class WandRemoteCardEditor extends HTMLElement {
     });
     this.shadowRoot.querySelectorAll("[data-room]").forEach((input) => input.addEventListener("change", () => this._updateRoom(input)));
     this.shadowRoot.querySelectorAll("[data-device]").forEach((input) => input.addEventListener("change", () => this._updateDevice(input)));
+    this.shadowRoot.querySelectorAll("[data-entity-input]").forEach((input) => input.addEventListener("change", () => this._updateEntityInput(input)));
     this.shadowRoot.querySelectorAll("[data-device-check]").forEach((input) => input.addEventListener("change", () => {
       this._device()[input.dataset.deviceCheck] = input.checked;
       this._changed();
@@ -753,23 +810,20 @@ class WandRemoteCardEditor extends HTMLElement {
     this.shadowRoot.querySelector("[data-remove-room]")?.addEventListener("click", () => this._removeRoom());
     this.shadowRoot.querySelector("[data-add-device]")?.addEventListener("click", () => this._addDevice());
     this.shadowRoot.querySelector("[data-remove-device]")?.addEventListener("click", () => this._removeDevice());
+    this.shadowRoot.querySelector("[data-sync-card-config]")?.addEventListener("click", () => this._syncFromCardConfig(true));
+    this.shadowRoot.querySelector("[data-use-media-power]")?.addEventListener("click", () => {
+      const device = this._device();
+      device.power_entity = device.media_player_id || device.card_config?.media_player_id || "";
+      this._syncDeviceCardConfig();
+      this._changed(true);
+    });
   }
 
-  _renderEntityPickers() {
+  _refreshEntityLists() {
     if (!this._hass || !this.shadowRoot) return;
-    this.shadowRoot.querySelectorAll(".entity-picker").forEach((host) => {
-      if (host.firstElementChild) return;
-      const picker = document.createElement("ha-entity-picker");
-      picker.hass = this._hass;
-      picker.value = host.dataset.value || "";
-      picker.allowCustomEntity = true;
-      if (host.dataset.domain) picker.includeDomains = [host.dataset.domain];
-      picker.addEventListener("value-changed", (event) => {
-        this._device()[host.dataset.entityField] = event.detail.value || "";
-        this._syncDeviceCardConfig();
-        this._changed();
-      });
-      host.appendChild(picker);
+    this.shadowRoot.querySelectorAll("datalist").forEach((list) => {
+      const input = this.shadowRoot.querySelector(`[list="${list.id}"]`);
+      list.innerHTML = this._entityOptions(input?.dataset.domain || "");
     });
   }
 
@@ -796,15 +850,37 @@ class WandRemoteCardEditor extends HTMLElement {
     this._changed();
   }
 
+  _updateEntityInput(input) {
+    const device = this._device();
+    device[input.dataset.entityInput] = input.value.trim();
+    if (input.dataset.entityInput === "media_player_id" && !device.power_entity) {
+      device.power_entity = device.media_player_id;
+    }
+    this._syncDeviceCardConfig();
+    this._changed();
+  }
+
   _updateJson(input) {
     try {
       this._device()[input.dataset.deviceJson] = JSON.parse(input.value || "{}");
+      if (input.dataset.deviceJson === "card_config") this._syncFromCardConfig(false);
       input.setCustomValidity("");
       this._changed();
     } catch (err) {
       input.setCustomValidity("Must be valid JSON.");
       input.reportValidity();
     }
+  }
+
+  _syncFromCardConfig(render = false) {
+    const device = this._device();
+    const config = device.card_config || {};
+    device.remote_id = config.remote_id || device.remote_id || "";
+    device.media_player_id = config.media_player_id || device.media_player_id || "";
+    device.platform = config.platform || device.platform || "";
+    device.power_entity = device.power_entity || device.media_player_id || device.remote_id || "";
+    this._syncDeviceCardConfig();
+    this._changed(render);
   }
 
   _updateAction(input) {
@@ -929,13 +1005,13 @@ class WandRemoteCardEditor extends HTMLElement {
       textarea { min-height:160px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; font-size:12px; }
       .toolbar { display:grid; grid-template-columns:1fr auto auto; gap:8px; align-items:center; }
       button { border:1px solid var(--divider-color); border-radius:10px; padding:10px 12px; background:var(--card-background-color); color:var(--primary-text-color); font-weight:700; cursor:pointer; }
+      .quick-actions { display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:8px; }
       .toggles { display:grid; grid-template-columns:repeat(auto-fit, minmax(190px, 1fr)); gap:8px; }
       .check { display:flex; align-items:center; gap:8px; color:var(--primary-text-color); }
       .check input { width:auto; min-height:auto; }
       details { border:1px solid var(--divider-color); border-radius:10px; padding:10px; display:grid; gap:10px; }
       summary { cursor:pointer; font-weight:800; color:var(--primary-text-color); }
       details label { margin-top:10px; }
-      ha-entity-picker { display:block; width:100%; }
     `;
   }
 
