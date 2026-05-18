@@ -1,4 +1,4 @@
-const VERSION = "0.8.2";
+const VERSION = "0.8.3";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -40,6 +40,7 @@ const DEFAULT_CONFIG = {
           source_name: "Apple TV",
           home_on_select: true,
           home_command: "auto",
+          select_delay_ms: 900,
           switch_action: null,
           power_on_action: null,
           power_off_action: null,
@@ -216,6 +217,7 @@ class WandRemoteCard extends HTMLElement {
       auto_select_source: device.auto_select_source ?? true,
       home_on_select: device.home_on_select ?? true,
       home_command: device.home_command || "auto",
+      select_delay_ms: Number(device.select_delay_ms ?? 900),
       availability_entities: device.availability_entities || [],
       switch_action: device.switch_action || null,
       power_on_action: device.power_on_action || null,
@@ -570,9 +572,10 @@ class WandRemoteCard extends HTMLElement {
 
   async _selectDevice(device, room) {
     if (!device) return;
+    let switched = false;
     if (device.switch_action) {
       await this._runAction(device.switch_action);
-      return;
+      switched = true;
     }
 
     if (device.auto_select_source) {
@@ -583,10 +586,16 @@ class WandRemoteCard extends HTMLElement {
           entity_id: sourceEntity,
           source: sourceName
         });
+        switched = true;
       }
     }
 
+    if (switched && device.select_delay_ms > 0) await this._sleep(device.select_delay_ms);
     if (device.home_on_select) await this._sendDeviceHome(device);
+  }
+
+  _sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
 
   async _sendDeviceHome(device) {
@@ -910,6 +919,7 @@ class WandRemoteCardEditor extends HTMLElement {
         <div class="section-title">
           <div><h3>Behavior</h3><p>Optional scripts for switching and power sequencing.</p></div>
         </div>
+        ${this._scriptPicker("device-switch", "Source/input script", device.switch_action)}
         ${this._actionEditor("device-switch", "Run when selected", device.switch_action)}
         ${this._actionEditor("device-power-on", "Power on action", device.power_on_action)}
         ${this._actionEditor("device-power-off", "Power off action", device.power_off_action)}
@@ -918,6 +928,7 @@ class WandRemoteCardEditor extends HTMLElement {
         <label class="check"><input type="checkbox" data-device-check="auto_select_source" ${device.auto_select_source ? "checked" : ""}> Select source when tapped</label>
         <label class="check"><input type="checkbox" data-device-check="home_on_select" ${device.home_on_select ? "checked" : ""}> Send Home when tapped</label>
         <label>Home command<input data-device="home_command" value="${this._escape(device.home_command || "auto")}" placeholder="auto"></label>
+        <label>Delay before Home<input type="number" min="0" step="100" data-device-number="select_delay_ms" value="${this._escape(device.select_delay_ms ?? 900)}"></label>
       </section>
 
       <section class="editor-card">
@@ -995,6 +1006,25 @@ class WandRemoteCardEditor extends HTMLElement {
     `;
   }
 
+  _scriptPicker(kind, label, action) {
+    const script = this._scriptFromAction(action);
+    const listId = `wand-${kind}-scripts`;
+    return `
+      <label>${this._escape(label)}
+        <input data-action-script="${this._escape(kind)}" data-domain="script" list="${listId}" value="${this._escape(script)}" placeholder="script.dining_samsung_the_frame_65_source_hdmi_1">
+        <datalist id="${listId}">${this._entityOptions("script")}</datalist>
+      </label>
+    `;
+  }
+
+  _scriptFromAction(action) {
+    if (!action) return "";
+    if (String(action.service || "").startsWith("script.") && action.service !== "script.turn_on") return action.service;
+    const target = action.target?.entity_id;
+    if (Array.isArray(target)) return target[0] || "";
+    return target || "";
+  }
+
   _toggle(field, label) {
     return `<label class="check"><input type="checkbox" data-root-check="${field}" ${this._config[field] ? "checked" : ""}> ${this._escape(label)}</label>`;
   }
@@ -1024,7 +1054,12 @@ class WandRemoteCardEditor extends HTMLElement {
       this._device()[input.dataset.deviceCheck] = input.checked;
       this._changed();
     }));
+    this.shadowRoot.querySelectorAll("[data-device-number]").forEach((input) => input.addEventListener("change", () => {
+      this._device()[input.dataset.deviceNumber] = Number(input.value || 0);
+      this._changed();
+    }));
     this.shadowRoot.querySelectorAll("[data-device-json]").forEach((input) => input.addEventListener("change", () => this._updateJson(input)));
+    this.shadowRoot.querySelectorAll("[data-action-script]").forEach((input) => input.addEventListener("change", () => this._updateScriptAction(input)));
     this.shadowRoot.querySelectorAll("[data-action-service],[data-action-target],[data-action-data]").forEach((input) => input.addEventListener("change", () => this._updateAction(input)));
     this.shadowRoot.querySelectorAll("[data-remote-row-action]").forEach((input) => input.addEventListener("change", () => this._updateRemoteRowAction(input)));
     this.shadowRoot.querySelectorAll("[data-add-remote-action]").forEach((button) => button.addEventListener("click", () => this._addRemoteAction(Number(button.dataset.addRemoteAction))));
@@ -1176,6 +1211,15 @@ class WandRemoteCardEditor extends HTMLElement {
     }
   }
 
+  _updateScriptAction(input) {
+    const path = this._actionPath(input.dataset.actionScript);
+    if (!path) return;
+    const owner = path.owner === "room" ? this._room() : this._device();
+    const entityId = input.value.trim();
+    owner[path.field] = entityId ? { service: "script.turn_on", target: { entity_id: entityId } } : null;
+    this._changed(true);
+  }
+
   _syncFromCardConfig(render = false) {
     const device = this._device();
     const config = device.card_config || {};
@@ -1282,6 +1326,7 @@ class WandRemoteCardEditor extends HTMLElement {
       auto_select_source: true,
       home_on_select: true,
       home_command: "auto",
+      select_delay_ms: 900,
       card_config: {
         type: this._config.universal_remote_card_type || "custom:universal-remote-card",
         custom_actions: [],
