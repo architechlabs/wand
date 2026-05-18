@@ -18,6 +18,8 @@ A Home Assistant custom integration plus Lovelace card for building polished, re
 
 ## Install in Home Assistant
 
+### Integration install
+
 Copy `custom_components/wand_remote` into:
 
 ```text
@@ -47,6 +49,28 @@ http://YOUR_HA_ADDRESS:8123/wand_remote/wand-remote-card.js?v=0.2.0
 ```
 
 If that URL returns 404, the integration has not been added in **Devices & services** or Home Assistant has not restarted after installation.
+
+### HACS frontend install
+
+If you want the card to appear from HACS as a frontend card, add this repository to HACS as type **Dashboard** or **Frontend** instead of Integration.
+
+Use this resource URL:
+
+```text
+/hacsfiles/wand/wand.js
+```
+
+If your HACS folder name differs, use the URL shown by HACS for the downloaded frontend plugin. The `wand.js` file exists at the repo root and under `dist/` for HACS plugin validation.
+
+### Why `/wand_remote/...` can 404
+
+The `/wand_remote/wand-remote-card.js` route is created by the backend integration at runtime. It does not exist just because HACS downloaded files. It exists only after:
+
+- the files are under `/config/custom_components/wand_remote`
+- Home Assistant has restarted
+- **Wand Universal Remote** has been added in **Settings -> Devices & services**
+
+For pure frontend/HACS card usage, use `/hacsfiles/wand/wand-remote-card.js` instead.
 
 ## Recommended model
 

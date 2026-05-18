@@ -1,6 +1,7 @@
 {
   "name": "Wand",
   "homeassistant": "2024.1.0",
+  "filename": "wand.js",
   "render_readme": true,
   "country": ["US", "CA", "GB", "AU", "NZ"]
 }
