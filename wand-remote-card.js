@@ -1,4 +1,4 @@
-const VERSION = "0.2.0";
+const VERSION = "0.8.0";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -13,6 +13,7 @@ const DEFAULT_CONFIG = {
   show_power_bar: true,
   show_entity_status: true,
   show_unavailable_devices: true,
+  persist_navigation: true,
   use_universal_remote_card: true,
   universal_remote_card_type: "custom:universal-remote-card",
   rooms: [
@@ -21,6 +22,7 @@ const DEFAULT_CONFIG = {
       name: "Master Bedroom",
       icon: "mdi:bed-king",
       accent: "#a78bfa",
+      source_entity_id: "",
       power_on_action: null,
       power_off_action: null,
       devices: [
@@ -33,6 +35,10 @@ const DEFAULT_CONFIG = {
           remote_id: "remote.bedroom",
           media_player_id: "media_player.bedroom",
           power_entity: "media_player.bedroom",
+          source_entity_id: "",
+          source_name: "Apple TV",
+          home_on_select: true,
+          home_command: "home",
           switch_action: null,
           power_on_action: null,
           power_off_action: null,
@@ -138,6 +144,7 @@ class WandRemoteCard extends HTMLElement {
     this._helpers = null;
     this._embeddedCard = null;
     this._embeddedSignature = "";
+    this._restoredSelection = false;
   }
 
   static getStubConfig() {
@@ -150,8 +157,11 @@ class WandRemoteCard extends HTMLElement {
 
   setConfig(config) {
     this._config = this._normalizeConfig(config);
-    this._selectedRoom = this._selectedRoom || this._config.rooms?.[0]?.id;
-    this._selectedDevice = this._selectedDevice || this._currentRoom()?.devices?.[0]?.id;
+    this._restoreSelection();
+    if (this._selectedRoom && !this._config.rooms?.some((room) => room.id === this._selectedRoom)) {
+      this._selectedRoom = null;
+      this._selectedDevice = null;
+    }
     this._render();
   }
 
@@ -172,6 +182,7 @@ class WandRemoteCard extends HTMLElement {
       name: room.name || "Room",
       icon: room.icon || "mdi:sofa",
       accent: room.accent || "#38bdf8",
+      source_entity_id: room.source_entity_id || "",
       power_on_action: room.power_on_action || null,
       power_off_action: room.power_off_action || null,
       devices: (room.devices || []).map((device) => this._normalizeDevice(device, merged))
@@ -199,6 +210,11 @@ class WandRemoteCard extends HTMLElement {
       remote_id: device.remote_id || cardConfig.remote_id || "",
       media_player_id: device.media_player_id || cardConfig.media_player_id || "",
       power_entity: device.power_entity || device.media_player_id || cardConfig.media_player_id || device.remote_id || "",
+      source_entity_id: device.source_entity_id || "",
+      source_name: device.source_name || device.name || cardConfig.platform || "",
+      auto_select_source: device.auto_select_source ?? true,
+      home_on_select: device.home_on_select ?? true,
+      home_command: device.home_command || "home",
       availability_entities: device.availability_entities || [],
       switch_action: device.switch_action || null,
       power_on_action: device.power_on_action || null,
@@ -211,7 +227,8 @@ class WandRemoteCard extends HTMLElement {
   }
 
   _currentRoom() {
-    return (this._config.rooms || []).find((room) => room.id === this._selectedRoom) || this._config.rooms?.[0];
+    if (!this._selectedRoom) return null;
+    return (this._config.rooms || []).find((room) => room.id === this._selectedRoom) || null;
   }
 
   _visibleDevices(room) {
@@ -228,6 +245,31 @@ class WandRemoteCard extends HTMLElement {
 
   _entityState(entityId) {
     return entityId && this._hass?.states?.[entityId] ? this._hass.states[entityId].state : undefined;
+  }
+
+  _entityAttributes(entityId) {
+    return entityId && this._hass?.states?.[entityId] ? this._hass.states[entityId].attributes || {} : {};
+  }
+
+  _roomSourceEntity(room) {
+    return room?.source_entity_id || room?.devices?.find((device) => device.source_entity_id)?.source_entity_id || room?.devices?.find((device) => device.media_player_id)?.media_player_id || "";
+  }
+
+  _currentSource(room) {
+    const entityId = this._roomSourceEntity(room);
+    return this._entityAttributes(entityId).source || this._entityAttributes(entityId).app_name || "";
+  }
+
+  _sourceMatches(device, room = this._currentRoom()) {
+    const current = String(this._currentSource(room) || "").toLowerCase();
+    const expected = String(device?.source_name || device?.name || "").toLowerCase();
+    return Boolean(current && expected && current === expected);
+  }
+
+  _sourceSupported(entityId, sourceName) {
+    const sources = this._entityAttributes(entityId).source_list;
+    if (!Array.isArray(sources) || !sources.length) return false;
+    return sources.some((source) => String(source).toLowerCase() === String(sourceName).toLowerCase());
   }
 
   _isUnavailable(device) {
@@ -257,25 +299,30 @@ class WandRemoteCard extends HTMLElement {
     const theme = THEMES[this._config.theme] || THEMES.midnight;
     const accent = device?.accent || room?.accent || "#38bdf8";
     const roomPower = this._roomPowerState(room);
+    const isLanding = !room;
+    const source = this._currentSource(room);
 
     this.shadowRoot.innerHTML = `
       <style>${this._styles(theme, accent)}</style>
-      <ha-card class="wrap">
-        <header>
-          <div class="title">
-            <p>${this._escape(this._config.title || "Universal Remote")}</p>
-            <h2>${this._escape(room?.name || "Select room")}</h2>
-          </div>
-          <div class="header-actions">
-            ${this._config.show_entity_status ? `<span class="badge ${roomPower}">${this._escape(roomPower)}</span>` : ""}
-            ${this._config.show_power_bar ? `<button class="power-room ${roomPower}" data-room-power title="Room power"><ha-icon icon="mdi:power"></ha-icon></button>` : ""}
-          </div>
-        </header>
+      <ha-card class="wrap ${isLanding ? "landing-wrap" : "control-wrap"}">
+        ${isLanding ? this._landingPage() : `
+          <header class="control-header">
+            <button class="back" data-back title="Areas"><ha-icon icon="mdi:chevron-left"></ha-icon></button>
+            <div class="title">
+              <p>${this._escape(this._config.title || "Universal Remote")}</p>
+              <h2>${this._escape(room.name)}</h2>
+              ${source ? `<small class="source-line">Source: ${this._escape(source)}</small>` : ""}
+            </div>
+            <div class="header-actions">
+              ${this._config.show_entity_status ? `<span class="badge ${roomPower}">${this._escape(roomPower)}</span>` : ""}
+              ${this._config.show_power_bar ? `<button class="power-room ${roomPower}" data-room-power title="Room power"><ha-icon icon="mdi:power"></ha-icon></button>` : ""}
+            </div>
+          </header>
 
-        <section class="rooms">${(this._config.rooms || []).map((item) => this._roomButton(item)).join("")}</section>
-        ${room ? `<section class="devices">${this._visibleDevices(room).map((item) => this._deviceButton(item)).join("")}</section>` : ""}
-        ${device ? this._deviceHeader(device) : `<div class="empty">Add a room and device in the visual editor.</div>`}
-        <section id="remote-host" class="remote-host">${device ? this._fallbackRemote(device) : ""}</section>
+          <section class="device-strip">${this._visibleDevices(room).map((item) => this._deviceButton(item)).join("")}</section>
+          ${device ? this._deviceHeader(device) : `<div class="empty">Add a device for ${this._escape(room.name)} in the visual editor.</div>`}
+          <section id="remote-host" class="remote-host">${device ? this._fallbackRemote(device) : ""}</section>
+        `}
       </ha-card>
     `;
 
@@ -284,15 +331,25 @@ class WandRemoteCard extends HTMLElement {
         this._selectedRoom = button.dataset.room;
         this._selectedDevice = this._visibleDevices(this._currentRoom())?.[0]?.id;
         this._embeddedCard = null;
+        this._rememberSelection();
         this._render();
       });
+    });
+
+    this.shadowRoot.querySelector("[data-back]")?.addEventListener("click", () => {
+      this._selectedRoom = null;
+      this._selectedDevice = null;
+      this._embeddedCard = null;
+      this._rememberSelection();
+      this._render();
     });
 
     this.shadowRoot.querySelectorAll("[data-device]").forEach((button) => {
       button.addEventListener("click", async () => {
         this._selectedDevice = button.dataset.device;
         this._embeddedCard = null;
-        await this._runAction(this._currentDevice()?.switch_action);
+        this._rememberSelection();
+        await this._selectDevice(this._currentDevice(), room);
         this._render();
       });
     });
@@ -303,7 +360,69 @@ class WandRemoteCard extends HTMLElement {
       button.addEventListener("click", () => this._callFallbackAction(device, button.dataset.fallbackAction));
     });
 
-    this._renderEmbeddedRemote(device);
+    if (!isLanding) this._renderEmbeddedRemote(device);
+  }
+
+  _landingPage() {
+    return `
+      <header class="landing-header">
+        <div class="title">
+          <p>${this._escape(this._config.title || "Universal Remote")}</p>
+          <h2>Choose Area</h2>
+        </div>
+      </header>
+      <section class="area-grid">
+        ${(this._config.rooms || []).map((room) => this._areaCard(room)).join("")}
+      </section>
+    `;
+  }
+
+  _storageKey() {
+    const path = window.location?.pathname || "dashboard";
+    return `wand-remote-card:${path}:${this._config.title || "remote"}:selection`;
+  }
+
+  _restoreSelection() {
+    if (this._restoredSelection || !this._config.persist_navigation) return;
+    this._restoredSelection = true;
+    try {
+      const saved = JSON.parse(localStorage.getItem(this._storageKey()) || "{}");
+      if (saved.room && this._config.rooms?.some((room) => room.id === saved.room)) {
+        this._selectedRoom = saved.room;
+        const room = this._config.rooms.find((item) => item.id === saved.room);
+        this._selectedDevice = room?.devices?.some((device) => device.id === saved.device)
+          ? saved.device
+          : room?.devices?.[0]?.id;
+      }
+    } catch (err) {
+      this._selectedRoom = null;
+      this._selectedDevice = null;
+    }
+  }
+
+  _rememberSelection() {
+    if (!this._config.persist_navigation) return;
+    try {
+      localStorage.setItem(this._storageKey(), JSON.stringify({ room: this._selectedRoom, device: this._selectedDevice }));
+    } catch (err) {
+      // Ignore storage failures; navigation still works for the current session.
+    }
+  }
+
+  _areaCard(room) {
+    const state = this._roomPowerState(room);
+    const devices = room.devices?.length || 0;
+    const active = (room.devices || []).filter((device) => this._isOn(device)).length;
+    return `
+      <button class="area-card" data-room="${this._escape(room.id)}" style="--item-accent:${this._escape(room.accent)}">
+        <span class="area-icon"><ha-icon icon="${this._escape(room.icon)}"></ha-icon></span>
+        <span class="area-copy">
+          <strong>${this._escape(room.name)}</strong>
+          <small>${devices} device${devices === 1 ? "" : "s"} · ${active} active</small>
+        </span>
+        <i class="${state}"></i>
+      </button>
+    `;
   }
 
   _roomButton(room) {
@@ -321,8 +440,9 @@ class WandRemoteCard extends HTMLElement {
   _deviceButton(device) {
     const selected = device.id === this._currentDevice()?.id ? " selected" : "";
     const state = this._isUnavailable(device) ? "issue" : this._isOn(device) ? "on" : "off";
+    const sourceActive = this._sourceMatches(device) ? " source-active" : "";
     return `
-      <button class="device${selected}" data-device="${this._escape(device.id)}" style="--item-accent:${this._escape(device.accent)}">
+      <button class="device${selected}${sourceActive}" data-device="${this._escape(device.id)}" style="--item-accent:${this._escape(device.accent)}">
         <ha-icon icon="${this._escape(device.icon)}"></ha-icon>
         <span>${this._escape(device.name)}</span>
         <i class="${state}"></i>
@@ -332,13 +452,18 @@ class WandRemoteCard extends HTMLElement {
 
   _deviceHeader(device) {
     const state = this._isUnavailable(device) ? "Unavailable" : this._isOn(device) ? "On" : "Off";
-    const entity = device.power_entity || device.media_player_id || device.remote_id || "No entity";
+    const source = this._currentSource(this._currentRoom());
+    const isSourceActive = this._sourceMatches(device);
+    const chips = [
+      isSourceActive ? `<span class="active">Active source</span>` : "",
+      source ? `<span>${this._escape(source)}</span>` : ""
+    ].filter(Boolean).join("");
     return `
       <section class="device-header" style="--device-accent:${this._escape(device.accent)}">
         <div>
           <p>Now controlling</p>
           <h3>${this._escape(device.name)}</h3>
-          <small>${this._escape(entity)} · ${this._escape(state)}</small>
+          ${chips ? `<div class="control-chips">${chips}</div>` : ""}
         </div>
         <button class="power-device ${state.toLowerCase()}" data-device-power title="Device power">
           <ha-icon icon="mdi:power"></ha-icon>
@@ -425,6 +550,39 @@ class WandRemoteCard extends HTMLElement {
     await this._setDevicePower(device, this._isOn(device) ? "off" : "on");
   }
 
+  async _selectDevice(device, room) {
+    if (!device) return;
+    if (device.switch_action) {
+      await this._runAction(device.switch_action);
+      return;
+    }
+
+    if (device.auto_select_source) {
+      const sourceEntity = device.source_entity_id || this._roomSourceEntity(room);
+      const sourceName = device.source_name || device.name;
+      if (sourceEntity && sourceName && this._sourceSupported(sourceEntity, sourceName)) {
+        await this._hass?.callService("media_player", "select_source", {
+          entity_id: sourceEntity,
+          source: sourceName
+        });
+      }
+    }
+
+    if (device.home_on_select) await this._sendDeviceHome(device);
+  }
+
+  async _sendDeviceHome(device) {
+    if (!this._hass || !device) return;
+    const command = device.home_command || "home";
+    if (device.remote_id && command) {
+      await this._hass.callService("remote", "send_command", { entity_id: device.remote_id, command });
+      return;
+    }
+    if (device.media_player_id) {
+      await this._hass.callService("homeassistant", "turn_on", { entity_id: device.media_player_id });
+    }
+  }
+
   async _setDevicePower(device, mode) {
     const custom = mode === "on" ? device.power_on_action : device.power_off_action;
     if (custom) {
@@ -475,13 +633,21 @@ class WandRemoteCard extends HTMLElement {
       }
       header, .header-actions, .device-header { display:flex; align-items:center; gap:12px; }
       header { justify-content:space-between; margin-bottom:16px; }
+      .landing-wrap { min-height:260px; }
+      .landing-header { margin-bottom:18px; }
+      .control-header { display:grid; grid-template-columns:auto 1fr auto; }
       .title { min-width:0; }
+      .source-line { display:block; margin-top:5px; color:${theme.muted}; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       p { margin:0 0 4px; color:${theme.muted}; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:1.8px; }
       h2, h3 { margin:0; line-height:1.1; letter-spacing:0; }
       h2 { font-size:24px; }
       h3 { font-size:20px; }
       small { display:block; margin-top:5px; color:${theme.muted}; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       button { font:inherit; color:inherit; border:0; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+      .back {
+        width:42px; height:42px; border-radius:50%; display:grid; place-items:center; background:${theme.panel}; border:1px solid ${theme.border};
+        transition:transform .16s ease, background .16s ease;
+      }
       .badge { padding:7px 10px; border-radius:999px; border:1px solid ${theme.border}; background:${theme.panel}; color:${theme.muted}; font-size:11px; font-weight:800; text-transform:uppercase; }
       .badge.on, .badge.issue { color:${theme.text}; border-color:color-mix(in srgb, var(--accent) 45%, ${theme.border}); }
       .power-room, .power-device {
@@ -489,20 +655,35 @@ class WandRemoteCard extends HTMLElement {
         transition:transform .16s ease, background .16s ease, border-color .16s ease;
       }
       .power-room.on, .power-device.on { background:color-mix(in srgb, var(--accent) 24%, ${theme.panelStrong}); border-color:color-mix(in srgb, var(--accent) 62%, ${theme.border}); }
-      .rooms, .devices { display:grid; gap:10px; margin-bottom:14px; }
-      .rooms { grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); }
-      .devices { grid-template-columns:repeat(auto-fit, minmax(82px, 1fr)); }
-      .room, .device {
+      .area-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:12px; }
+      .area-card {
+        position:relative; min-height:116px; padding:18px; border-radius:22px; display:flex; align-items:center; gap:16px; text-align:left;
+        background:linear-gradient(135deg, color-mix(in srgb, var(--item-accent) 12%, ${theme.panel}), ${theme.panel});
+        border:1px solid ${theme.border}; backdrop-filter:blur(18px);
+        transition:transform .18s ease, background .18s ease, border-color .18s ease, box-shadow .18s ease;
+      }
+      .area-card:hover { background:linear-gradient(135deg, color-mix(in srgb, var(--item-accent) 18%, ${theme.panelStrong}), ${theme.panelStrong}); border-color:color-mix(in srgb, var(--item-accent) 44%, ${theme.border}); }
+      .area-card:active, .back:active { transform:scale(.96); }
+      .area-icon {
+        width:56px; height:56px; flex:0 0 auto; display:grid; place-items:center; border-radius:18px;
+        background:color-mix(in srgb, var(--item-accent) 18%, ${theme.panelStrong}); border:1px solid color-mix(in srgb, var(--item-accent) 40%, ${theme.border});
+      }
+      .area-icon ha-icon { color:var(--item-accent); --mdc-icon-size:32px; }
+      .area-copy { min-width:0; display:grid; gap:5px; }
+      .area-copy strong { font-size:16px; line-height:1.15; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .area-copy small { margin:0; }
+      .device-strip { display:grid; grid-template-columns:repeat(auto-fit, minmax(92px, 1fr)); gap:10px; margin-bottom:14px; }
+      .device {
         position:relative; min-height:76px; border-radius:18px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px;
         background:${theme.panel}; border:1px solid ${theme.border}; backdrop-filter:blur(18px);
         transition:transform .18s ease, background .18s ease, border-color .18s ease, box-shadow .18s ease;
       }
-      .room:hover, .device:hover, .action:hover, .power-room:hover, .power-device:hover { background:${theme.panelStrong}; }
-      .room:active, .device:active, .action:active, .power-room:active, .power-device:active { transform:scale(.96); }
-      .room.selected, .device.selected { border-color:color-mix(in srgb, var(--item-accent) 62%, transparent); box-shadow:0 0 0 3px color-mix(in srgb, var(--item-accent) 15%, transparent); }
-      .room ha-icon { color:var(--item-accent); --mdc-icon-size:30px; }
+      .device:hover, .action:hover, .power-room:hover, .power-device:hover, .back:hover { background:${theme.panelStrong}; }
+      .device:active, .action:active, .power-room:active, .power-device:active { transform:scale(.96); }
+      .device.selected { border-color:color-mix(in srgb, var(--item-accent) 62%, transparent); box-shadow:0 0 0 3px color-mix(in srgb, var(--item-accent) 15%, transparent); background:linear-gradient(135deg, color-mix(in srgb, var(--item-accent) 22%, ${theme.panelStrong}), ${theme.panelStrong}); }
+      .device.source-active { border-color:#22c55e; box-shadow:0 0 0 3px rgba(34,197,94,.14), 0 10px 24px rgba(34,197,94,.10); }
       .device ha-icon { color:var(--item-accent); --mdc-icon-size:26px; }
-      .room span, .device span { max-width:100%; padding:0 8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:760; }
+      .device span { max-width:100%; padding:0 8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:760; }
       .device span { font-size:12px; color:${theme.muted}; }
       i { position:absolute; top:9px; right:9px; width:8px; height:8px; border-radius:50%; background:${theme.border}; }
       i.on { background:#22c55e; box-shadow:0 0 0 4px rgba(34,197,94,.12); }
@@ -512,6 +693,9 @@ class WandRemoteCard extends HTMLElement {
         background:linear-gradient(135deg, color-mix(in srgb, var(--device-accent) 15%, ${theme.panel}), ${theme.panel});
         border:1px solid color-mix(in srgb, var(--device-accent) 36%, ${theme.border});
       }
+      .control-chips { display:flex; gap:8px; flex-wrap:wrap; margin-top:9px; }
+      .control-chips span { max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:5px 8px; border-radius:999px; background:${theme.panel}; border:1px solid ${theme.border}; color:${theme.muted}; font-size:11px; font-weight:800; }
+      .control-chips .active { color:#22c55e; border-color:rgba(34,197,94,.42); background:rgba(34,197,94,.10); }
       .remote-host { border-radius:22px; overflow:hidden; }
       .remote-host.embedded { background:transparent; }
       .remote-host[data-error]::before { content:attr(data-error); display:block; margin-bottom:10px; color:${theme.muted}; font-size:12px; text-align:center; }
@@ -523,10 +707,11 @@ class WandRemoteCard extends HTMLElement {
       .empty { padding:28px; text-align:center; color:${theme.muted}; border:1px dashed ${theme.border}; border-radius:18px; }
       @media (max-width: 520px) {
         .wrap { padding:16px; border-radius:20px; }
-        header { align-items:flex-start; }
+        .control-header { grid-template-columns:auto 1fr; }
+        .header-actions { grid-column:1 / -1; justify-content:flex-end; }
         h2 { font-size:21px; }
-        .rooms { grid-template-columns:repeat(auto-fit, minmax(115px, 1fr)); }
-        .devices { grid-template-columns:repeat(auto-fit, minmax(74px, 1fr)); }
+        .area-grid { grid-template-columns:1fr; }
+        .device-strip { grid-template-columns:repeat(auto-fit, minmax(74px, 1fr)); }
       }
     `;
   }
@@ -552,7 +737,7 @@ class WandRemoteCardEditor extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    this._renderEntityPickers();
+    this._refreshEntityLists();
   }
 
   _render() {
@@ -561,33 +746,51 @@ class WandRemoteCardEditor extends HTMLElement {
     this.shadowRoot.innerHTML = `
       <style>${this._styles()}</style>
       <div class="editor">
-        <section>
-          <h3>Card</h3>
-          <label>Title<input data-root="title" value="${this._escape(this._config.title || "")}"></label>
-          <label>Theme<select data-root="theme">${Object.keys(THEMES).map((key) => `<option value="${key}" ${this._config.theme === key ? "selected" : ""}>${key.replace("_", " ")}</option>`).join("")}</select></label>
-          <label>Remote card type<input data-root="universal_remote_card_type" value="${this._escape(this._config.universal_remote_card_type || "custom:universal-remote-card")}"></label>
-          <div class="toggles">
-            ${this._toggle("use_universal_remote_card", "Embed universal-remote-card")}
-            ${this._toggle("show_power_bar", "Show room power")}
-            ${this._toggle("show_entity_status", "Show status")}
-            ${this._toggle("show_unavailable_devices", "Show unavailable devices")}
+        <section class="editor-card">
+          <div class="section-title">
+            <div><h3>Basics</h3><p>Choose how the remote appears and behaves.</p></div>
           </div>
+          <div class="field-grid two">
+            <label>Title<input data-root="title" value="${this._escape(this._config.title || "")}"></label>
+            <label>Theme<select data-root="theme">${Object.keys(THEMES).map((key) => `<option value="${key}" ${this._config.theme === key ? "selected" : ""}>${key.replace("_", " ")}</option>`).join("")}</select></label>
+          </div>
+          <details>
+            <summary>Display options</summary>
+            <div class="toggles">
+              ${this._toggle("use_universal_remote_card", "Embed universal-remote-card")}
+              ${this._toggle("show_power_bar", "Show room power")}
+              ${this._toggle("show_entity_status", "Show status")}
+              ${this._toggle("show_unavailable_devices", "Show unavailable devices")}
+              ${this._toggle("persist_navigation", "Remember selected area")}
+            </div>
+            <label>Remote card type<input data-root="universal_remote_card_type" value="${this._escape(this._config.universal_remote_card_type || "custom:universal-remote-card")}"></label>
+          </details>
         </section>
 
-        <div class="toolbar">
-          <select data-select-room>${(this._config.rooms || []).map((item, index) => `<option value="${index}" ${index === this._roomIndex ? "selected" : ""}>${this._escape(item.name || "Room")}</option>`).join("")}</select>
-          <button data-add-room>Add room</button>
-          <button data-remove-room>Remove</button>
-        </div>
+        <section class="editor-card">
+          <div class="section-title">
+            <div><h3>Areas</h3><p>Create landing-page areas, then configure each area’s devices.</p></div>
+          </div>
+          <div class="toolbar">
+            <select data-select-room>${(this._config.rooms || []).map((item, index) => `<option value="${index}" ${index === this._roomIndex ? "selected" : ""}>${this._escape(item.name || "Room")}</option>`).join("")}</select>
+            <button data-add-room>Add area</button>
+            <button data-remove-room>Remove</button>
+          </div>
+        </section>
 
         ${room ? this._roomEditor(room) : ""}
 
         ${room ? `
+          <section class="editor-card">
+          <div class="section-title">
+            <div><h3>Devices</h3><p>Select which device or media player appears in this area.</p></div>
+          </div>
           <div class="toolbar">
             <select data-select-device>${(room.devices || []).map((item, index) => `<option value="${index}" ${index === this._deviceIndex ? "selected" : ""}>${this._escape(item.name || "Device")}</option>`).join("")}</select>
             <button data-add-device>Add device</button>
             <button data-remove-device>Remove</button>
           </div>
+          </section>
         ` : ""}
 
         ${device ? this._deviceEditor(device) : ""}
@@ -595,49 +798,145 @@ class WandRemoteCardEditor extends HTMLElement {
     `;
 
     this._bindEvents();
-    this._renderEntityPickers();
+    this._refreshEntityLists();
+    this._mountUniversalRemoteEditor(device);
   }
 
   _roomEditor(room) {
     return `
-      <section>
-        <h3>Room</h3>
-        <label>Name<input data-room="name" value="${this._escape(room.name || "")}"></label>
-        <label>Icon<input data-room="icon" value="${this._escape(room.icon || "")}"></label>
-        <label>Accent<input type="color" data-room="accent" value="${this._escape(room.accent || "#38bdf8")}"></label>
-        ${this._actionEditor("room-power-on", "Power on script/service", room.power_on_action)}
-        ${this._actionEditor("room-power-off", "Power off script/service", room.power_off_action)}
+      <section class="editor-card">
+        <div class="section-title">
+          <div><h3>Area Details</h3><p>This is the tile shown on the first screen.</p></div>
+        </div>
+        <div class="field-grid three">
+          <label>Name<input data-room="name" value="${this._escape(room.name || "")}"></label>
+          <label>Icon<input data-room="icon" value="${this._escape(room.icon || "")}"></label>
+          <label>Accent<input type="color" data-room="accent" value="${this._escape(room.accent || "#38bdf8")}"></label>
+        </div>
+        ${this._entityPicker("source_entity_id", "Source/status media player", room.source_entity_id, "media_player", "room")}
+        <details>
+          <summary>Area power actions</summary>
+          ${this._actionEditor("room-power-on", "Power on script/service", room.power_on_action)}
+          ${this._actionEditor("room-power-off", "Power off script/service", room.power_off_action)}
+        </details>
       </section>
     `;
   }
 
   _deviceEditor(device) {
     return `
-      <section>
-        <h3>Device</h3>
-        <label>Name<input data-device="name" value="${this._escape(device.name || "")}"></label>
-        <label>Icon<input data-device="icon" value="${this._escape(device.icon || "")}"></label>
-        <label>Accent<input type="color" data-device="accent" value="${this._escape(device.accent || "#38bdf8")}"></label>
-        <label>Platform<input data-device="platform" value="${this._escape(device.platform || "")}" placeholder="Apple TV, Samsung TV, Denon AVR"></label>
+      <section class="editor-card">
+        <div class="section-title">
+          <div><h3>Device Details</h3><p>How this device appears in the area.</p></div>
+        </div>
+        <div class="field-grid three">
+          <label>Name<input data-device="name" value="${this._escape(device.name || "")}"></label>
+          <label>Icon<input data-device="icon" value="${this._escape(device.icon || "")}"></label>
+          <label>Accent<input type="color" data-device="accent" value="${this._escape(device.accent || "#38bdf8")}"></label>
+        </div>
+      </section>
+
+      <section class="editor-card">
+        <div class="section-title">
+          <div><h3>Remote Essentials</h3><p>Pick the entities the remote should control.</p></div>
+        </div>
+        <label>Platform<select data-device="platform">
+          ${["", "Apple TV", "Samsung TV", "Denon AVR", "Tata Play", "Google TV", "Fire TV", "Roku", "Kodi", "Android TV", "Generic"].map((name) => `<option value="${this._escape(name)}" ${device.platform === name ? "selected" : ""}>${this._escape(name || "Auto / custom")}</option>`).join("")}
+        </select></label>
         ${this._entityPicker("remote_id", "Remote entity", device.remote_id, "remote")}
         ${this._entityPicker("media_player_id", "Media player", device.media_player_id, "media_player")}
         ${this._entityPicker("power_entity", "Power/status entity", device.power_entity, "")}
+        ${this._entityPicker("source_entity_id", "Source switcher media player", device.source_entity_id, "media_player")}
+        <label>Source name<input data-device="source_name" value="${this._escape(device.source_name || device.name || "")}" placeholder="Apple TV, Google TV, HDMI 1"></label>
+        <div class="quick-actions">
+          <button data-sync-card-config>Sync from card config</button>
+          <button data-use-media-power>Use media player for power</button>
+        </div>
+        <details>
+          <summary>Remote buttons</summary>
+          ${this._rowsEditor(device)}
+        </details>
+        <details>
+          <summary>Use universal-remote-card editor</summary>
+          <div class="nested-editor" data-universal-editor>
+            <div class="notice">If the installed universal-remote-card exposes its own editor, it appears here. Otherwise use the fields above.</div>
+          </div>
+        </details>
+      </section>
+
+      <section class="editor-card">
+        <div class="section-title">
+          <div><h3>Behavior</h3><p>Optional scripts for switching and power sequencing.</p></div>
+        </div>
         ${this._actionEditor("device-switch", "Run when selected", device.switch_action)}
         ${this._actionEditor("device-power-on", "Power on action", device.power_on_action)}
         ${this._actionEditor("device-power-off", "Power off action", device.power_off_action)}
         <label class="check"><input type="checkbox" data-device-check="hidden_when_off" ${device.hidden_when_off ? "checked" : ""}> Hide when unavailable filter is active</label>
         <label class="check"><input type="checkbox" data-device-check="use_universal_remote_card" ${device.use_universal_remote_card ?? this._config.use_universal_remote_card ? "checked" : ""}> Use universal-remote-card for this device</label>
+        <label class="check"><input type="checkbox" data-device-check="auto_select_source" ${device.auto_select_source ? "checked" : ""}> Select source when tapped</label>
+        <label class="check"><input type="checkbox" data-device-check="home_on_select" ${device.home_on_select ? "checked" : ""}> Send Home when tapped</label>
+        <label>Home command<input data-device="home_command" value="${this._escape(device.home_command || "home")}" placeholder="home"></label>
+      </section>
+
+      <section class="editor-card">
+        <details>
+        <summary>Advanced JSON bridge</summary>
         <label>Universal remote card config<textarea data-device-json="card_config">${this._escape(JSON.stringify(device.card_config || this._deviceToCardConfig(device), null, 2))}</textarea></label>
+        </details>
       </section>
     `;
   }
 
-  _entityPicker(field, label, value, domain) {
+  _rowsEditor(device) {
+    const rows = this._cardRows(device);
+    const options = ["back", "power", "home", "menu", "touchpad", "volume_buttons", "rewind", "previous", "play_pause", "next", "fast_forward", "channel_up", "channel_down", "up", "down", "left", "right", "select", "n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8", "n9"];
+    return `
+      <div class="rows-builder">
+        <div class="section-head">
+          <strong>Remote buttons</strong>
+          <button data-add-remote-row>Add row</button>
+        </div>
+        ${rows.map((row, rowIndex) => `
+          <div class="remote-row-editor">
+            <span>Row ${rowIndex + 1}</span>
+            ${(Array.isArray(row) ? row : [row]).map((item, actionIndex) => {
+              const key = Array.isArray(item) ? item[0] : item;
+              return `
+                <label>
+                  <select data-remote-row-action="${rowIndex}:${actionIndex}">
+                    ${options.map((option) => `<option value="${option}" ${key === option ? "selected" : ""}>${this._escape(option.replaceAll("_", " "))}</option>`).join("")}
+                  </select>
+                  <button data-remove-remote-action="${rowIndex}:${actionIndex}">Remove</button>
+                </label>
+              `;
+            }).join("")}
+            <div class="quick-actions">
+              <button data-add-remote-action="${rowIndex}">Add button</button>
+              <button data-remove-remote-row="${rowIndex}">Remove row</button>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+    `;
+  }
+
+  _entityPicker(field, label, value, domain, scope = "device") {
+    const listId = `wand-${scope}-${field}-${domain || "all"}`;
     return `
       <label>${this._escape(label)}
-        <div class="entity-picker" data-entity-field="${this._escape(field)}" data-domain="${this._escape(domain)}" data-value="${this._escape(value || "")}"></div>
+        <input data-entity-input="${this._escape(field)}" data-entity-scope="${this._escape(scope)}" data-domain="${this._escape(domain)}" list="${listId}" value="${this._escape(value || "")}" placeholder="${this._escape(domain ? `${domain}.example` : "media_player.example")}">
+        <datalist id="${listId}">${this._entityOptions(domain)}</datalist>
       </label>
     `;
+  }
+
+  _entityOptions(domain) {
+    if (!this._hass?.states) return "";
+    return Object.keys(this._hass.states)
+      .filter((entityId) => !domain || entityId.startsWith(`${domain}.`))
+      .sort()
+      .map((entityId) => `<option value="${this._escape(entityId)}"></option>`)
+      .join("");
   }
 
   _actionEditor(kind, label, action) {
@@ -645,7 +944,7 @@ class WandRemoteCardEditor extends HTMLElement {
     const data = action?.service_data ? JSON.stringify(action.service_data) : "";
     const target = action?.target ? JSON.stringify(action.target) : "";
     return `
-      <details>
+      <details class="sub-details">
         <summary>${this._escape(label)}</summary>
         <label>Service<input data-action-service="${kind}" value="${this._escape(value)}" placeholder="script.turn_on or media_player.select_source"></label>
         <label>Target JSON<input data-action-target="${kind}" value="${this._escape(target)}" placeholder='{"entity_id":"script.example"}'></label>
@@ -678,33 +977,59 @@ class WandRemoteCardEditor extends HTMLElement {
     });
     this.shadowRoot.querySelectorAll("[data-room]").forEach((input) => input.addEventListener("change", () => this._updateRoom(input)));
     this.shadowRoot.querySelectorAll("[data-device]").forEach((input) => input.addEventListener("change", () => this._updateDevice(input)));
+    this.shadowRoot.querySelectorAll("[data-entity-input]").forEach((input) => input.addEventListener("change", () => this._updateEntityInput(input)));
     this.shadowRoot.querySelectorAll("[data-device-check]").forEach((input) => input.addEventListener("change", () => {
       this._device()[input.dataset.deviceCheck] = input.checked;
       this._changed();
     }));
     this.shadowRoot.querySelectorAll("[data-device-json]").forEach((input) => input.addEventListener("change", () => this._updateJson(input)));
     this.shadowRoot.querySelectorAll("[data-action-service],[data-action-target],[data-action-data]").forEach((input) => input.addEventListener("change", () => this._updateAction(input)));
+    this.shadowRoot.querySelectorAll("[data-remote-row-action]").forEach((input) => input.addEventListener("change", () => this._updateRemoteRowAction(input)));
+    this.shadowRoot.querySelectorAll("[data-add-remote-action]").forEach((button) => button.addEventListener("click", () => this._addRemoteAction(Number(button.dataset.addRemoteAction))));
+    this.shadowRoot.querySelectorAll("[data-remove-remote-action]").forEach((button) => button.addEventListener("click", () => this._removeRemoteAction(button.dataset.removeRemoteAction)));
+    this.shadowRoot.querySelector("[data-add-remote-row]")?.addEventListener("click", () => this._addRemoteRow());
+    this.shadowRoot.querySelectorAll("[data-remove-remote-row]").forEach((button) => button.addEventListener("click", () => this._removeRemoteRow(Number(button.dataset.removeRemoteRow))));
     this.shadowRoot.querySelector("[data-add-room]")?.addEventListener("click", () => this._addRoom());
     this.shadowRoot.querySelector("[data-remove-room]")?.addEventListener("click", () => this._removeRoom());
     this.shadowRoot.querySelector("[data-add-device]")?.addEventListener("click", () => this._addDevice());
     this.shadowRoot.querySelector("[data-remove-device]")?.addEventListener("click", () => this._removeDevice());
+    this.shadowRoot.querySelector("[data-sync-card-config]")?.addEventListener("click", () => this._syncFromCardConfig(true));
+    this.shadowRoot.querySelector("[data-use-media-power]")?.addEventListener("click", () => {
+      const device = this._device();
+      device.power_entity = device.media_player_id || device.card_config?.media_player_id || "";
+      this._syncDeviceCardConfig();
+      this._changed(true);
+    });
   }
 
-  _renderEntityPickers() {
+  _refreshEntityLists() {
     if (!this._hass || !this.shadowRoot) return;
-    this.shadowRoot.querySelectorAll(".entity-picker").forEach((host) => {
-      if (host.firstElementChild) return;
-      const picker = document.createElement("ha-entity-picker");
-      picker.hass = this._hass;
-      picker.value = host.dataset.value || "";
-      picker.allowCustomEntity = true;
-      if (host.dataset.domain) picker.includeDomains = [host.dataset.domain];
-      picker.addEventListener("value-changed", (event) => {
-        this._device()[host.dataset.entityField] = event.detail.value || "";
-        this._syncDeviceCardConfig();
-        this._changed();
-      });
-      host.appendChild(picker);
+    this.shadowRoot.querySelectorAll("datalist").forEach((list) => {
+      const input = this.shadowRoot.querySelector(`[list="${list.id}"]`);
+      list.innerHTML = this._entityOptions(input?.dataset.domain || "");
+    });
+  }
+
+  _mountUniversalRemoteEditor(device) {
+    const host = this.shadowRoot?.querySelector("[data-universal-editor]");
+    if (!host || !device) return;
+
+    const cardConfig = this._deviceToCardConfig(device);
+    const elementName = String(cardConfig.type || "custom:universal-remote-card").replace(/^custom:/, "");
+    const cardClass = customElements.get(elementName);
+    const editorFactory = cardClass?.getConfigElement;
+    const editorElement = typeof editorFactory === "function" ? editorFactory.call(cardClass) : customElements.get(`${elementName}-editor`) ? document.createElement(`${elementName}-editor`) : null;
+
+    if (!editorElement) return;
+
+    host.replaceChildren(editorElement);
+    if (this._hass) editorElement.hass = this._hass;
+    if (typeof editorElement.setConfig === "function") editorElement.setConfig(cardConfig);
+    editorElement.addEventListener("config-changed", (event) => {
+      event.stopPropagation();
+      const deviceRef = this._device();
+      deviceRef.card_config = event.detail?.config || deviceRef.card_config || {};
+      this._syncFromCardConfig(false);
     });
   }
 
@@ -731,15 +1056,94 @@ class WandRemoteCardEditor extends HTMLElement {
     this._changed();
   }
 
+  _updateEntityInput(input) {
+    if (input.dataset.entityScope === "room") {
+      this._room()[input.dataset.entityInput] = input.value.trim();
+      this._changed();
+      return;
+    }
+
+    const device = this._device();
+    device[input.dataset.entityInput] = input.value.trim();
+    if (input.dataset.entityInput === "media_player_id" && !device.power_entity) {
+      device.power_entity = device.media_player_id;
+    }
+    this._syncDeviceCardConfig();
+    this._changed();
+  }
+
+  _cardRows(device = this._device()) {
+    const rows = device.card_config?.rows || device.rows || DEFAULT_REMOTE_ROWS;
+    return clone(rows);
+  }
+
+  _setCardRows(rows) {
+    const device = this._device();
+    device.card_config = {
+      ...(device.card_config || this._deviceToCardConfig(device)),
+      rows
+    };
+    device.rows = rows;
+    this._changed(true);
+  }
+
+  _updateRemoteRowAction(input) {
+    const [rowIndex, actionIndex] = input.dataset.remoteRowAction.split(":").map(Number);
+    const rows = this._cardRows();
+    rows[rowIndex][actionIndex] = input.value === "volume_buttons" ? ["volume_buttons"] : input.value;
+    this._setCardRows(rows);
+  }
+
+  _addRemoteRow() {
+    const rows = this._cardRows();
+    rows.push(["back", "home", "menu"]);
+    this._setCardRows(rows);
+  }
+
+  _removeRemoteRow(rowIndex) {
+    const rows = this._cardRows();
+    if (rows.length <= 1) return;
+    rows.splice(rowIndex, 1);
+    this._setCardRows(rows);
+  }
+
+  _addRemoteAction(rowIndex) {
+    const rows = this._cardRows();
+    rows[rowIndex] = rows[rowIndex] || [];
+    rows[rowIndex].push("select");
+    this._setCardRows(rows);
+  }
+
+  _removeRemoteAction(pointer) {
+    const [rowIndex, actionIndex] = pointer.split(":").map(Number);
+    const rows = this._cardRows();
+    if ((rows[rowIndex] || []).length <= 1) return;
+    rows[rowIndex].splice(actionIndex, 1);
+    this._setCardRows(rows);
+  }
+
   _updateJson(input) {
     try {
       this._device()[input.dataset.deviceJson] = JSON.parse(input.value || "{}");
+      if (input.dataset.deviceJson === "card_config") this._syncFromCardConfig(false);
       input.setCustomValidity("");
       this._changed();
     } catch (err) {
       input.setCustomValidity("Must be valid JSON.");
       input.reportValidity();
     }
+  }
+
+  _syncFromCardConfig(render = false) {
+    const device = this._device();
+    const config = device.card_config || {};
+    device.remote_id = config.remote_id || device.remote_id || "";
+    device.media_player_id = config.media_player_id || device.media_player_id || "";
+    device.platform = config.platform || device.platform || "";
+    device.source_name = device.source_name || config.source || config.platform || device.name || "";
+    device.power_entity = device.power_entity || device.media_player_id || device.remote_id || "";
+    this._syncDeviceCardConfig();
+    this._changed(render);
   }
 
   _updateAction(input) {
@@ -831,6 +1235,11 @@ class WandRemoteCardEditor extends HTMLElement {
       remote_id: "",
       media_player_id: "",
       power_entity: "",
+      source_entity_id: "",
+      source_name: "New Device",
+      auto_select_source: true,
+      home_on_select: true,
+      home_command: "home",
       card_config: {
         type: this._config.universal_remote_card_type || "custom:universal-remote-card",
         custom_actions: [],
@@ -857,20 +1266,41 @@ class WandRemoteCardEditor extends HTMLElement {
   _styles() {
     return `
       .editor { display:grid; gap:14px; color:var(--primary-text-color); }
-      section { display:grid; gap:12px; padding:14px; border:1px solid var(--divider-color); border-radius:12px; }
+      section { display:grid; gap:12px; }
+      .editor-card { padding:16px; border:1px solid var(--divider-color); border-radius:14px; background:color-mix(in srgb, var(--card-background-color) 88%, transparent); }
+      .section-title { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+      .section-title h3 { margin:0 0 4px; }
+      .section-title p { margin:0; color:var(--secondary-text-color); font-size:12px; line-height:1.35; }
       h3 { margin:0; font-size:14px; letter-spacing:0; }
       label { display:grid; gap:6px; font-size:12px; font-weight:700; color:var(--secondary-text-color); }
       input, select, textarea { width:100%; min-height:40px; border:1px solid var(--divider-color); border-radius:10px; padding:9px 10px; background:var(--card-background-color); color:var(--primary-text-color); font:inherit; }
       textarea { min-height:160px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; font-size:12px; }
       .toolbar { display:grid; grid-template-columns:1fr auto auto; gap:8px; align-items:center; }
       button { border:1px solid var(--divider-color); border-radius:10px; padding:10px 12px; background:var(--card-background-color); color:var(--primary-text-color); font-weight:700; cursor:pointer; }
+      button:hover { background:color-mix(in srgb, var(--primary-color) 10%, var(--card-background-color)); }
+      .field-grid { display:grid; gap:10px; }
+      .field-grid.two { grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); }
+      .field-grid.three { grid-template-columns:repeat(auto-fit, minmax(145px, 1fr)); }
+      .quick-actions { display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:8px; }
+      .section-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+      .rows-builder { display:grid; gap:10px; }
+      .remote-row-editor { display:grid; gap:8px; padding:10px; border:1px solid var(--divider-color); border-radius:12px; }
+      .remote-row-editor > span { font-size:12px; font-weight:800; color:var(--secondary-text-color); text-transform:uppercase; letter-spacing:.08em; }
+      .remote-row-editor label { grid-template-columns:1fr auto; align-items:end; }
+      .nested-editor { display:block; margin-top:10px; }
+      .notice { padding:12px; border:1px dashed var(--divider-color); border-radius:10px; color:var(--secondary-text-color); font-size:12px; line-height:1.4; }
       .toggles { display:grid; grid-template-columns:repeat(auto-fit, minmax(190px, 1fr)); gap:8px; }
       .check { display:flex; align-items:center; gap:8px; color:var(--primary-text-color); }
       .check input { width:auto; min-height:auto; }
-      details { border:1px solid var(--divider-color); border-radius:10px; padding:10px; display:grid; gap:10px; }
-      summary { cursor:pointer; font-weight:800; color:var(--primary-text-color); }
+      details { border:1px solid var(--divider-color); border-radius:12px; padding:0; display:grid; gap:10px; overflow:hidden; background:color-mix(in srgb, var(--card-background-color) 70%, transparent); }
+      details[open] { padding-bottom:10px; }
+      summary { cursor:pointer; font-weight:800; color:var(--primary-text-color); padding:12px; list-style:none; }
+      summary::-webkit-details-marker { display:none; }
+      summary::after { content:"+"; float:right; color:var(--secondary-text-color); }
+      details[open] > summary::after { content:"-"; }
+      details > label, details > .toggles, details > .rows-builder, details > .nested-editor { margin:0 10px; }
+      .sub-details { background:transparent; }
       details label { margin-top:10px; }
-      ha-entity-picker { display:block; width:100%; }
     `;
   }
 

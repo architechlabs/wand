@@ -1,4 +1,4 @@
-const VERSION = "0.7.0";
+const VERSION = "0.8.0";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -37,6 +37,8 @@ const DEFAULT_CONFIG = {
           power_entity: "media_player.bedroom",
           source_entity_id: "",
           source_name: "Apple TV",
+          home_on_select: true,
+          home_command: "home",
           switch_action: null,
           power_on_action: null,
           power_off_action: null,
@@ -211,6 +213,8 @@ class WandRemoteCard extends HTMLElement {
       source_entity_id: device.source_entity_id || "",
       source_name: device.source_name || device.name || cardConfig.platform || "",
       auto_select_source: device.auto_select_source ?? true,
+      home_on_select: device.home_on_select ?? true,
+      home_command: device.home_command || "home",
       availability_entities: device.availability_entities || [],
       switch_action: device.switch_action || null,
       power_on_action: device.power_on_action || null,
@@ -260,6 +264,12 @@ class WandRemoteCard extends HTMLElement {
     const current = String(this._currentSource(room) || "").toLowerCase();
     const expected = String(device?.source_name || device?.name || "").toLowerCase();
     return Boolean(current && expected && current === expected);
+  }
+
+  _sourceSupported(entityId, sourceName) {
+    const sources = this._entityAttributes(entityId).source_list;
+    if (!Array.isArray(sources) || !sources.length) return false;
+    return sources.some((source) => String(source).toLowerCase() === String(sourceName).toLowerCase());
   }
 
   _isUnavailable(device) {
@@ -442,14 +452,18 @@ class WandRemoteCard extends HTMLElement {
 
   _deviceHeader(device) {
     const state = this._isUnavailable(device) ? "Unavailable" : this._isOn(device) ? "On" : "Off";
-    const entity = device.power_entity || device.media_player_id || device.remote_id || "No entity";
     const source = this._currentSource(this._currentRoom());
+    const isSourceActive = this._sourceMatches(device);
+    const chips = [
+      isSourceActive ? `<span class="active">Active source</span>` : "",
+      source ? `<span>${this._escape(source)}</span>` : ""
+    ].filter(Boolean).join("");
     return `
       <section class="device-header" style="--device-accent:${this._escape(device.accent)}">
         <div>
           <p>Now controlling</p>
           <h3>${this._escape(device.name)}</h3>
-          <small>${this._escape(entity)} · ${this._escape(state)}${source ? ` · Source: ${this._escape(source)}` : ""}</small>
+          ${chips ? `<div class="control-chips">${chips}</div>` : ""}
         </div>
         <button class="power-device ${state.toLowerCase()}" data-device-power title="Device power">
           <ha-icon icon="mdi:power"></ha-icon>
@@ -543,15 +557,30 @@ class WandRemoteCard extends HTMLElement {
       return;
     }
 
-    if (!device.auto_select_source) return;
-    const sourceEntity = device.source_entity_id || this._roomSourceEntity(room);
-    const sourceName = device.source_name || device.name;
-    if (!sourceEntity || !sourceName) return;
+    if (device.auto_select_source) {
+      const sourceEntity = device.source_entity_id || this._roomSourceEntity(room);
+      const sourceName = device.source_name || device.name;
+      if (sourceEntity && sourceName && this._sourceSupported(sourceEntity, sourceName)) {
+        await this._hass?.callService("media_player", "select_source", {
+          entity_id: sourceEntity,
+          source: sourceName
+        });
+      }
+    }
 
-    await this._hass?.callService("media_player", "select_source", {
-      entity_id: sourceEntity,
-      source: sourceName
-    });
+    if (device.home_on_select) await this._sendDeviceHome(device);
+  }
+
+  async _sendDeviceHome(device) {
+    if (!this._hass || !device) return;
+    const command = device.home_command || "home";
+    if (device.remote_id && command) {
+      await this._hass.callService("remote", "send_command", { entity_id: device.remote_id, command });
+      return;
+    }
+    if (device.media_player_id) {
+      await this._hass.callService("homeassistant", "turn_on", { entity_id: device.media_player_id });
+    }
   }
 
   async _setDevicePower(device, mode) {
@@ -664,6 +693,9 @@ class WandRemoteCard extends HTMLElement {
         background:linear-gradient(135deg, color-mix(in srgb, var(--device-accent) 15%, ${theme.panel}), ${theme.panel});
         border:1px solid color-mix(in srgb, var(--device-accent) 36%, ${theme.border});
       }
+      .control-chips { display:flex; gap:8px; flex-wrap:wrap; margin-top:9px; }
+      .control-chips span { max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:5px 8px; border-radius:999px; background:${theme.panel}; border:1px solid ${theme.border}; color:${theme.muted}; font-size:11px; font-weight:800; }
+      .control-chips .active { color:#22c55e; border-color:rgba(34,197,94,.42); background:rgba(34,197,94,.10); }
       .remote-host { border-radius:22px; overflow:hidden; }
       .remote-host.embedded { background:transparent; }
       .remote-host[data-error]::before { content:attr(data-error); display:block; margin-bottom:10px; color:${theme.muted}; font-size:12px; text-align:center; }
@@ -842,6 +874,8 @@ class WandRemoteCardEditor extends HTMLElement {
         <label class="check"><input type="checkbox" data-device-check="hidden_when_off" ${device.hidden_when_off ? "checked" : ""}> Hide when unavailable filter is active</label>
         <label class="check"><input type="checkbox" data-device-check="use_universal_remote_card" ${device.use_universal_remote_card ?? this._config.use_universal_remote_card ? "checked" : ""}> Use universal-remote-card for this device</label>
         <label class="check"><input type="checkbox" data-device-check="auto_select_source" ${device.auto_select_source ? "checked" : ""}> Select source when tapped</label>
+        <label class="check"><input type="checkbox" data-device-check="home_on_select" ${device.home_on_select ? "checked" : ""}> Send Home when tapped</label>
+        <label>Home command<input data-device="home_command" value="${this._escape(device.home_command || "home")}" placeholder="home"></label>
       </section>
 
       <section class="editor-card">
@@ -1204,6 +1238,8 @@ class WandRemoteCardEditor extends HTMLElement {
       source_entity_id: "",
       source_name: "New Device",
       auto_select_source: true,
+      home_on_select: true,
+      home_command: "home",
       card_config: {
         type: this._config.universal_remote_card_type || "custom:universal-remote-card",
         custom_actions: [],
