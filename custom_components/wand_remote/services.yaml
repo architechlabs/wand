@@ -1,0 +1,25 @@
+call_action:
+  name: Call action
+  description: Calls a Home Assistant service from a Wand remote action.
+  fields:
+    domain:
+      name: Domain
+      required: true
+      selector:
+        text:
+    service:
+      name: Service
+      required: true
+      selector:
+        text:
+    target:
+      name: Target
+      required: false
+      selector:
+        object:
+    service_data:
+      name: Service data
+      required: false
+      selector:
+        object:
+

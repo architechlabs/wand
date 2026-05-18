@@ -1,0 +1,13 @@
+{
+  "domain": "wand_remote",
+  "name": "Wand Universal Remote",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": ["frontend", "lovelace"],
+  "documentation": "https://github.com/architechlabs/wand",
+  "integration_type": "helper",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/architechlabs/wand/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

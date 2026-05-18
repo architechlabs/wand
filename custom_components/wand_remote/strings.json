@@ -1,0 +1,24 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Wand Universal Remote",
+        "description": "Install the Wand Universal Remote dashboard card and editor."
+      }
+    },
+    "abort": {
+      "already_configured": "Wand Universal Remote is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Wand Universal Remote options",
+        "data": {
+          "show_advanced_actions": "Show advanced action controls",
+          "default_theme": "Default visual theme"
+        }
+      }
+    }
+  }
+}
