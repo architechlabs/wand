@@ -1,4 +1,4 @@
-const VERSION = "0.8.5";
+const VERSION = "0.8.6";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -213,7 +213,7 @@ class WandRemoteCard extends HTMLElement {
       media_player_id: device.media_player_id || cardConfig.media_player_id || "",
       power_entity: device.power_entity || device.media_player_id || cardConfig.media_player_id || device.remote_id || "",
       source_entity_id: device.source_entity_id || "",
-      source_name: device.source_name || device.name || cardConfig.platform || "",
+      source_name: this._cleanSourceName(device.source_name) || device.name || cardConfig.platform || "",
       auto_select_source: device.auto_select_source ?? true,
       home_on_select: device.home_on_select ?? true,
       home_command: device.home_command || "auto",
@@ -263,6 +263,23 @@ class WandRemoteCard extends HTMLElement {
     return this._entityAttributes(entityId).source || this._entityAttributes(entityId).app_name || "";
   }
 
+  _sourceEntityForDevice(device, room = this._currentRoom()) {
+    return device?.source_entity_id || room?.source_entity_id || "";
+  }
+
+  _cleanSourceName(sourceName) {
+    const value = String(sourceName || "").trim();
+    return ["", "new device"].includes(value.toLowerCase()) ? "" : value;
+  }
+
+  _desiredSourceName(device) {
+    return this._cleanSourceName(device?.source_name) || device?.name || device?.platform || "";
+  }
+
+  _normalizeSource(value) {
+    return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  }
+
   _mediaPreview(device) {
     const attrs = this._entityAttributes(device?.media_player_id) || {};
     const roomAttrs = this._entityAttributes(this._roomSourceEntity(this._currentRoom())) || {};
@@ -278,15 +295,24 @@ class WandRemoteCard extends HTMLElement {
   }
 
   _sourceMatches(device, room = this._currentRoom()) {
-    const current = String(this._currentSource(room) || "").toLowerCase();
-    const expected = String(device?.source_name || device?.name || "").toLowerCase();
-    return Boolean(current && expected && current === expected);
+    const entityId = this._sourceEntityForDevice(device, room);
+    if (!entityId) return false;
+    const current = this._entityAttributes(entityId).source || this._entityAttributes(entityId).app_name || "";
+    const expected = this._desiredSourceName(device);
+    return Boolean(current && expected && this._normalizeSource(current) === this._normalizeSource(expected));
   }
 
   _sourceSupported(entityId, sourceName) {
     const sources = this._entityAttributes(entityId).source_list;
     if (!Array.isArray(sources) || !sources.length) return false;
-    return sources.some((source) => String(source).toLowerCase() === String(sourceName).toLowerCase());
+    return Boolean(this._resolveSourceName(entityId, sourceName));
+  }
+
+  _resolveSourceName(entityId, sourceName) {
+    const sources = this._entityAttributes(entityId).source_list;
+    if (!Array.isArray(sources) || !sources.length) return "";
+    const wanted = this._normalizeSource(sourceName);
+    return sources.find((source) => this._normalizeSource(source) === wanted) || "";
   }
 
   _isUnavailable(device) {
@@ -579,12 +605,13 @@ class WandRemoteCard extends HTMLElement {
     }
 
     if (device.auto_select_source) {
-      const sourceEntity = device.source_entity_id || this._roomSourceEntity(room);
-      const sourceName = device.source_name || device.name;
-      if (sourceEntity && sourceName && this._sourceSupported(sourceEntity, sourceName)) {
+      const sourceEntity = this._sourceEntityForDevice(device, room);
+      const sourceName = this._desiredSourceName(device);
+      const resolvedSource = sourceEntity && sourceName ? this._resolveSourceName(sourceEntity, sourceName) : "";
+      if (sourceEntity && resolvedSource) {
         await this._hass?.callService("media_player", "select_source", {
           entity_id: sourceEntity,
-          source: sourceName
+          source: resolvedSource
         });
         switched = true;
       }
@@ -901,7 +928,7 @@ class WandRemoteCardEditor extends HTMLElement {
         ${this._entityPicker("media_player_id", "Media player", device.media_player_id, "media_player")}
         ${this._entityPicker("power_entity", "Power/status entity", device.power_entity, "")}
         ${this._entityPicker("source_entity_id", "Source switcher media player", device.source_entity_id, "media_player")}
-        <label>Source name<input data-device="source_name" value="${this._escape(device.source_name || device.name || "")}" placeholder="Apple TV, Google TV, HDMI 1"></label>
+        ${this._sourceNameInput(device)}
         <div class="quick-actions">
           <button data-sync-card-config>Sync from card config</button>
           <button data-use-media-power>Use media player for power</button>
@@ -993,6 +1020,28 @@ class WandRemoteCardEditor extends HTMLElement {
       .sort()
       .map((entityId) => `<option value="${this._escape(entityId)}"></option>`)
       .join("");
+  }
+
+  _sourceNameInput(device) {
+    const sourceEntity = device.source_entity_id || this._room()?.source_entity_id || "";
+    const sources = this._sourceList(sourceEntity);
+    const value = this._escape(device.source_name || device.name || "");
+    if (!sources.length) {
+      return `<label>Source name<input data-device="source_name" value="${value}" placeholder="Apple TV, Google TV, HDMI 1"></label>`;
+    }
+    return `
+      <label>Source name
+        <select data-device="source_name">
+          <option value="">Use device name</option>
+          ${sources.map((source) => `<option value="${this._escape(source)}" ${device.source_name === source ? "selected" : ""}>${this._escape(source)}</option>`).join("")}
+        </select>
+      </label>
+    `;
+  }
+
+  _sourceList(entityId) {
+    const sources = this._hass?.states?.[entityId]?.attributes?.source_list;
+    return Array.isArray(sources) ? sources : [];
   }
 
   _actionEditor(kind, label, action) {
@@ -1145,6 +1194,7 @@ class WandRemoteCardEditor extends HTMLElement {
     const device = this._device();
     device[input.dataset.device] = input.value;
     if (input.dataset.device === "name") device.id = slug(input.value);
+    if (input.dataset.device === "name" && !this._cleanSourceName(device.source_name)) device.source_name = input.value;
     this._syncDeviceCardConfig();
     this._changed();
   }
@@ -1243,7 +1293,7 @@ class WandRemoteCardEditor extends HTMLElement {
     device.remote_id = config.remote_id || device.remote_id || "";
     device.media_player_id = config.media_player_id || device.media_player_id || "";
     device.platform = config.platform || device.platform || "";
-    device.source_name = device.source_name || config.source || config.platform || device.name || "";
+    device.source_name = this._cleanSourceName(device.source_name) || config.source || config.platform || device.name || "";
     device.power_entity = device.power_entity || device.media_player_id || device.remote_id || "";
     this._syncDeviceCardConfig();
     this._changed(render);

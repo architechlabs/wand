@@ -4,7 +4,7 @@ from __future__ import annotations
 
 DOMAIN = "wand_remote"
 NAME = "Wand Universal Remote"
-VERSION = "0.8.5"
+VERSION = "0.8.6"
 
 CARD_FILENAME = "wand-remote-card.js"
 CARD_URL = f"/wand_remote/{CARD_FILENAME}"
