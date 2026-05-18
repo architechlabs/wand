@@ -1,4 +1,4 @@
-const VERSION = "0.5.0";
+const VERSION = "0.7.0";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -22,6 +22,7 @@ const DEFAULT_CONFIG = {
       name: "Master Bedroom",
       icon: "mdi:bed-king",
       accent: "#a78bfa",
+      source_entity_id: "",
       power_on_action: null,
       power_off_action: null,
       devices: [
@@ -34,6 +35,8 @@ const DEFAULT_CONFIG = {
           remote_id: "remote.bedroom",
           media_player_id: "media_player.bedroom",
           power_entity: "media_player.bedroom",
+          source_entity_id: "",
+          source_name: "Apple TV",
           switch_action: null,
           power_on_action: null,
           power_off_action: null,
@@ -177,6 +180,7 @@ class WandRemoteCard extends HTMLElement {
       name: room.name || "Room",
       icon: room.icon || "mdi:sofa",
       accent: room.accent || "#38bdf8",
+      source_entity_id: room.source_entity_id || "",
       power_on_action: room.power_on_action || null,
       power_off_action: room.power_off_action || null,
       devices: (room.devices || []).map((device) => this._normalizeDevice(device, merged))
@@ -204,6 +208,9 @@ class WandRemoteCard extends HTMLElement {
       remote_id: device.remote_id || cardConfig.remote_id || "",
       media_player_id: device.media_player_id || cardConfig.media_player_id || "",
       power_entity: device.power_entity || device.media_player_id || cardConfig.media_player_id || device.remote_id || "",
+      source_entity_id: device.source_entity_id || "",
+      source_name: device.source_name || device.name || cardConfig.platform || "",
+      auto_select_source: device.auto_select_source ?? true,
       availability_entities: device.availability_entities || [],
       switch_action: device.switch_action || null,
       power_on_action: device.power_on_action || null,
@@ -236,6 +243,25 @@ class WandRemoteCard extends HTMLElement {
     return entityId && this._hass?.states?.[entityId] ? this._hass.states[entityId].state : undefined;
   }
 
+  _entityAttributes(entityId) {
+    return entityId && this._hass?.states?.[entityId] ? this._hass.states[entityId].attributes || {} : {};
+  }
+
+  _roomSourceEntity(room) {
+    return room?.source_entity_id || room?.devices?.find((device) => device.source_entity_id)?.source_entity_id || room?.devices?.find((device) => device.media_player_id)?.media_player_id || "";
+  }
+
+  _currentSource(room) {
+    const entityId = this._roomSourceEntity(room);
+    return this._entityAttributes(entityId).source || this._entityAttributes(entityId).app_name || "";
+  }
+
+  _sourceMatches(device, room = this._currentRoom()) {
+    const current = String(this._currentSource(room) || "").toLowerCase();
+    const expected = String(device?.source_name || device?.name || "").toLowerCase();
+    return Boolean(current && expected && current === expected);
+  }
+
   _isUnavailable(device) {
     const entities = [device.power_entity, device.remote_id, device.media_player_id, ...(device.availability_entities || [])].filter(Boolean);
     return entities.length > 0 && entities.every((entityId) => ["unavailable", "unknown"].includes(this._entityState(entityId)));
@@ -264,6 +290,7 @@ class WandRemoteCard extends HTMLElement {
     const accent = device?.accent || room?.accent || "#38bdf8";
     const roomPower = this._roomPowerState(room);
     const isLanding = !room;
+    const source = this._currentSource(room);
 
     this.shadowRoot.innerHTML = `
       <style>${this._styles(theme, accent)}</style>
@@ -274,6 +301,7 @@ class WandRemoteCard extends HTMLElement {
             <div class="title">
               <p>${this._escape(this._config.title || "Universal Remote")}</p>
               <h2>${this._escape(room.name)}</h2>
+              ${source ? `<small class="source-line">Source: ${this._escape(source)}</small>` : ""}
             </div>
             <div class="header-actions">
               ${this._config.show_entity_status ? `<span class="badge ${roomPower}">${this._escape(roomPower)}</span>` : ""}
@@ -311,7 +339,7 @@ class WandRemoteCard extends HTMLElement {
         this._selectedDevice = button.dataset.device;
         this._embeddedCard = null;
         this._rememberSelection();
-        await this._runAction(this._currentDevice()?.switch_action);
+        await this._selectDevice(this._currentDevice(), room);
         this._render();
       });
     });
@@ -402,8 +430,9 @@ class WandRemoteCard extends HTMLElement {
   _deviceButton(device) {
     const selected = device.id === this._currentDevice()?.id ? " selected" : "";
     const state = this._isUnavailable(device) ? "issue" : this._isOn(device) ? "on" : "off";
+    const sourceActive = this._sourceMatches(device) ? " source-active" : "";
     return `
-      <button class="device${selected}" data-device="${this._escape(device.id)}" style="--item-accent:${this._escape(device.accent)}">
+      <button class="device${selected}${sourceActive}" data-device="${this._escape(device.id)}" style="--item-accent:${this._escape(device.accent)}">
         <ha-icon icon="${this._escape(device.icon)}"></ha-icon>
         <span>${this._escape(device.name)}</span>
         <i class="${state}"></i>
@@ -414,12 +443,13 @@ class WandRemoteCard extends HTMLElement {
   _deviceHeader(device) {
     const state = this._isUnavailable(device) ? "Unavailable" : this._isOn(device) ? "On" : "Off";
     const entity = device.power_entity || device.media_player_id || device.remote_id || "No entity";
+    const source = this._currentSource(this._currentRoom());
     return `
       <section class="device-header" style="--device-accent:${this._escape(device.accent)}">
         <div>
           <p>Now controlling</p>
           <h3>${this._escape(device.name)}</h3>
-          <small>${this._escape(entity)} · ${this._escape(state)}</small>
+          <small>${this._escape(entity)} · ${this._escape(state)}${source ? ` · Source: ${this._escape(source)}` : ""}</small>
         </div>
         <button class="power-device ${state.toLowerCase()}" data-device-power title="Device power">
           <ha-icon icon="mdi:power"></ha-icon>
@@ -506,6 +536,24 @@ class WandRemoteCard extends HTMLElement {
     await this._setDevicePower(device, this._isOn(device) ? "off" : "on");
   }
 
+  async _selectDevice(device, room) {
+    if (!device) return;
+    if (device.switch_action) {
+      await this._runAction(device.switch_action);
+      return;
+    }
+
+    if (!device.auto_select_source) return;
+    const sourceEntity = device.source_entity_id || this._roomSourceEntity(room);
+    const sourceName = device.source_name || device.name;
+    if (!sourceEntity || !sourceName) return;
+
+    await this._hass?.callService("media_player", "select_source", {
+      entity_id: sourceEntity,
+      source: sourceName
+    });
+  }
+
   async _setDevicePower(device, mode) {
     const custom = mode === "on" ? device.power_on_action : device.power_off_action;
     if (custom) {
@@ -560,6 +608,7 @@ class WandRemoteCard extends HTMLElement {
       .landing-header { margin-bottom:18px; }
       .control-header { display:grid; grid-template-columns:auto 1fr auto; }
       .title { min-width:0; }
+      .source-line { display:block; margin-top:5px; color:${theme.muted}; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       p { margin:0 0 4px; color:${theme.muted}; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:1.8px; }
       h2, h3 { margin:0; line-height:1.1; letter-spacing:0; }
       h2 { font-size:24px; }
@@ -603,6 +652,7 @@ class WandRemoteCard extends HTMLElement {
       .device:hover, .action:hover, .power-room:hover, .power-device:hover, .back:hover { background:${theme.panelStrong}; }
       .device:active, .action:active, .power-room:active, .power-device:active { transform:scale(.96); }
       .device.selected { border-color:color-mix(in srgb, var(--item-accent) 62%, transparent); box-shadow:0 0 0 3px color-mix(in srgb, var(--item-accent) 15%, transparent); background:linear-gradient(135deg, color-mix(in srgb, var(--item-accent) 22%, ${theme.panelStrong}), ${theme.panelStrong}); }
+      .device.source-active { border-color:#22c55e; box-shadow:0 0 0 3px rgba(34,197,94,.14), 0 10px 24px rgba(34,197,94,.10); }
       .device ha-icon { color:var(--item-accent); --mdc-icon-size:26px; }
       .device span { max-width:100%; padding:0 8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:760; }
       .device span { font-size:12px; color:${theme.muted}; }
@@ -664,34 +714,51 @@ class WandRemoteCardEditor extends HTMLElement {
     this.shadowRoot.innerHTML = `
       <style>${this._styles()}</style>
       <div class="editor">
-        <section>
-          <h3>Card</h3>
-          <label>Title<input data-root="title" value="${this._escape(this._config.title || "")}"></label>
-          <label>Theme<select data-root="theme">${Object.keys(THEMES).map((key) => `<option value="${key}" ${this._config.theme === key ? "selected" : ""}>${key.replace("_", " ")}</option>`).join("")}</select></label>
-          <label>Remote card type<input data-root="universal_remote_card_type" value="${this._escape(this._config.universal_remote_card_type || "custom:universal-remote-card")}"></label>
-          <div class="toggles">
-            ${this._toggle("use_universal_remote_card", "Embed universal-remote-card")}
-            ${this._toggle("show_power_bar", "Show room power")}
-            ${this._toggle("show_entity_status", "Show status")}
-            ${this._toggle("show_unavailable_devices", "Show unavailable devices")}
-            ${this._toggle("persist_navigation", "Remember selected area")}
+        <section class="editor-card">
+          <div class="section-title">
+            <div><h3>Basics</h3><p>Choose how the remote appears and behaves.</p></div>
           </div>
+          <div class="field-grid two">
+            <label>Title<input data-root="title" value="${this._escape(this._config.title || "")}"></label>
+            <label>Theme<select data-root="theme">${Object.keys(THEMES).map((key) => `<option value="${key}" ${this._config.theme === key ? "selected" : ""}>${key.replace("_", " ")}</option>`).join("")}</select></label>
+          </div>
+          <details>
+            <summary>Display options</summary>
+            <div class="toggles">
+              ${this._toggle("use_universal_remote_card", "Embed universal-remote-card")}
+              ${this._toggle("show_power_bar", "Show room power")}
+              ${this._toggle("show_entity_status", "Show status")}
+              ${this._toggle("show_unavailable_devices", "Show unavailable devices")}
+              ${this._toggle("persist_navigation", "Remember selected area")}
+            </div>
+            <label>Remote card type<input data-root="universal_remote_card_type" value="${this._escape(this._config.universal_remote_card_type || "custom:universal-remote-card")}"></label>
+          </details>
         </section>
 
-        <div class="toolbar">
-          <select data-select-room>${(this._config.rooms || []).map((item, index) => `<option value="${index}" ${index === this._roomIndex ? "selected" : ""}>${this._escape(item.name || "Room")}</option>`).join("")}</select>
-          <button data-add-room>Add room</button>
-          <button data-remove-room>Remove</button>
-        </div>
+        <section class="editor-card">
+          <div class="section-title">
+            <div><h3>Areas</h3><p>Create landing-page areas, then configure each area’s devices.</p></div>
+          </div>
+          <div class="toolbar">
+            <select data-select-room>${(this._config.rooms || []).map((item, index) => `<option value="${index}" ${index === this._roomIndex ? "selected" : ""}>${this._escape(item.name || "Room")}</option>`).join("")}</select>
+            <button data-add-room>Add area</button>
+            <button data-remove-room>Remove</button>
+          </div>
+        </section>
 
         ${room ? this._roomEditor(room) : ""}
 
         ${room ? `
+          <section class="editor-card">
+          <div class="section-title">
+            <div><h3>Devices</h3><p>Select which device or media player appears in this area.</p></div>
+          </div>
           <div class="toolbar">
             <select data-select-device>${(room.devices || []).map((item, index) => `<option value="${index}" ${index === this._deviceIndex ? "selected" : ""}>${this._escape(item.name || "Device")}</option>`).join("")}</select>
             <button data-add-device>Add device</button>
             <button data-remove-device>Remove</button>
           </div>
+          </section>
         ` : ""}
 
         ${device ? this._deviceEditor(device) : ""}
@@ -705,59 +772,83 @@ class WandRemoteCardEditor extends HTMLElement {
 
   _roomEditor(room) {
     return `
-      <section>
-        <h3>Room</h3>
-        <label>Name<input data-room="name" value="${this._escape(room.name || "")}"></label>
-        <label>Icon<input data-room="icon" value="${this._escape(room.icon || "")}"></label>
-        <label>Accent<input type="color" data-room="accent" value="${this._escape(room.accent || "#38bdf8")}"></label>
-        ${this._actionEditor("room-power-on", "Power on script/service", room.power_on_action)}
-        ${this._actionEditor("room-power-off", "Power off script/service", room.power_off_action)}
+      <section class="editor-card">
+        <div class="section-title">
+          <div><h3>Area Details</h3><p>This is the tile shown on the first screen.</p></div>
+        </div>
+        <div class="field-grid three">
+          <label>Name<input data-room="name" value="${this._escape(room.name || "")}"></label>
+          <label>Icon<input data-room="icon" value="${this._escape(room.icon || "")}"></label>
+          <label>Accent<input type="color" data-room="accent" value="${this._escape(room.accent || "#38bdf8")}"></label>
+        </div>
+        ${this._entityPicker("source_entity_id", "Source/status media player", room.source_entity_id, "media_player", "room")}
+        <details>
+          <summary>Area power actions</summary>
+          ${this._actionEditor("room-power-on", "Power on script/service", room.power_on_action)}
+          ${this._actionEditor("room-power-off", "Power off script/service", room.power_off_action)}
+        </details>
       </section>
     `;
   }
 
   _deviceEditor(device) {
     return `
-      <section>
-        <h3>Device</h3>
-        <label>Name<input data-device="name" value="${this._escape(device.name || "")}"></label>
-        <label>Icon<input data-device="icon" value="${this._escape(device.icon || "")}"></label>
-        <label>Accent<input type="color" data-device="accent" value="${this._escape(device.accent || "#38bdf8")}"></label>
+      <section class="editor-card">
+        <div class="section-title">
+          <div><h3>Device Details</h3><p>How this device appears in the area.</p></div>
+        </div>
+        <div class="field-grid three">
+          <label>Name<input data-device="name" value="${this._escape(device.name || "")}"></label>
+          <label>Icon<input data-device="icon" value="${this._escape(device.icon || "")}"></label>
+          <label>Accent<input type="color" data-device="accent" value="${this._escape(device.accent || "#38bdf8")}"></label>
+        </div>
       </section>
 
-      <section>
-        <h3>Universal Remote</h3>
+      <section class="editor-card">
+        <div class="section-title">
+          <div><h3>Remote Essentials</h3><p>Pick the entities the remote should control.</p></div>
+        </div>
         <label>Platform<select data-device="platform">
           ${["", "Apple TV", "Samsung TV", "Denon AVR", "Tata Play", "Google TV", "Fire TV", "Roku", "Kodi", "Android TV", "Generic"].map((name) => `<option value="${this._escape(name)}" ${device.platform === name ? "selected" : ""}>${this._escape(name || "Auto / custom")}</option>`).join("")}
         </select></label>
         ${this._entityPicker("remote_id", "Remote entity", device.remote_id, "remote")}
         ${this._entityPicker("media_player_id", "Media player", device.media_player_id, "media_player")}
         ${this._entityPicker("power_entity", "Power/status entity", device.power_entity, "")}
+        ${this._entityPicker("source_entity_id", "Source switcher media player", device.source_entity_id, "media_player")}
+        <label>Source name<input data-device="source_name" value="${this._escape(device.source_name || device.name || "")}" placeholder="Apple TV, Google TV, HDMI 1"></label>
         <div class="quick-actions">
           <button data-sync-card-config>Sync from card config</button>
           <button data-use-media-power>Use media player for power</button>
         </div>
-        ${this._rowsEditor(device)}
-        <details open>
-          <summary>Universal remote-card editor</summary>
+        <details>
+          <summary>Remote buttons</summary>
+          ${this._rowsEditor(device)}
+        </details>
+        <details>
+          <summary>Use universal-remote-card editor</summary>
           <div class="nested-editor" data-universal-editor>
             <div class="notice">If the installed universal-remote-card exposes its own editor, it appears here. Otherwise use the fields above.</div>
           </div>
         </details>
       </section>
 
-      <section>
-        <h3>Behavior</h3>
+      <section class="editor-card">
+        <div class="section-title">
+          <div><h3>Behavior</h3><p>Optional scripts for switching and power sequencing.</p></div>
+        </div>
         ${this._actionEditor("device-switch", "Run when selected", device.switch_action)}
         ${this._actionEditor("device-power-on", "Power on action", device.power_on_action)}
         ${this._actionEditor("device-power-off", "Power off action", device.power_off_action)}
         <label class="check"><input type="checkbox" data-device-check="hidden_when_off" ${device.hidden_when_off ? "checked" : ""}> Hide when unavailable filter is active</label>
         <label class="check"><input type="checkbox" data-device-check="use_universal_remote_card" ${device.use_universal_remote_card ?? this._config.use_universal_remote_card ? "checked" : ""}> Use universal-remote-card for this device</label>
+        <label class="check"><input type="checkbox" data-device-check="auto_select_source" ${device.auto_select_source ? "checked" : ""}> Select source when tapped</label>
       </section>
 
-      <section>
-        <h3>Advanced YAML Bridge</h3>
+      <section class="editor-card">
+        <details>
+        <summary>Advanced JSON bridge</summary>
         <label>Universal remote card config<textarea data-device-json="card_config">${this._escape(JSON.stringify(device.card_config || this._deviceToCardConfig(device), null, 2))}</textarea></label>
+        </details>
       </section>
     `;
   }
@@ -795,11 +886,11 @@ class WandRemoteCardEditor extends HTMLElement {
     `;
   }
 
-  _entityPicker(field, label, value, domain) {
-    const listId = `wand-${field}-${domain || "all"}`;
+  _entityPicker(field, label, value, domain, scope = "device") {
+    const listId = `wand-${scope}-${field}-${domain || "all"}`;
     return `
       <label>${this._escape(label)}
-        <input data-entity-input="${this._escape(field)}" data-domain="${this._escape(domain)}" list="${listId}" value="${this._escape(value || "")}" placeholder="${this._escape(domain ? `${domain}.example` : "media_player.example")}">
+        <input data-entity-input="${this._escape(field)}" data-entity-scope="${this._escape(scope)}" data-domain="${this._escape(domain)}" list="${listId}" value="${this._escape(value || "")}" placeholder="${this._escape(domain ? `${domain}.example` : "media_player.example")}">
         <datalist id="${listId}">${this._entityOptions(domain)}</datalist>
       </label>
     `;
@@ -819,7 +910,7 @@ class WandRemoteCardEditor extends HTMLElement {
     const data = action?.service_data ? JSON.stringify(action.service_data) : "";
     const target = action?.target ? JSON.stringify(action.target) : "";
     return `
-      <details>
+      <details class="sub-details">
         <summary>${this._escape(label)}</summary>
         <label>Service<input data-action-service="${kind}" value="${this._escape(value)}" placeholder="script.turn_on or media_player.select_source"></label>
         <label>Target JSON<input data-action-target="${kind}" value="${this._escape(target)}" placeholder='{"entity_id":"script.example"}'></label>
@@ -901,6 +992,7 @@ class WandRemoteCardEditor extends HTMLElement {
     if (this._hass) editorElement.hass = this._hass;
     if (typeof editorElement.setConfig === "function") editorElement.setConfig(cardConfig);
     editorElement.addEventListener("config-changed", (event) => {
+      event.stopPropagation();
       const deviceRef = this._device();
       deviceRef.card_config = event.detail?.config || deviceRef.card_config || {};
       this._syncFromCardConfig(false);
@@ -931,6 +1023,12 @@ class WandRemoteCardEditor extends HTMLElement {
   }
 
   _updateEntityInput(input) {
+    if (input.dataset.entityScope === "room") {
+      this._room()[input.dataset.entityInput] = input.value.trim();
+      this._changed();
+      return;
+    }
+
     const device = this._device();
     device[input.dataset.entityInput] = input.value.trim();
     if (input.dataset.entityInput === "media_player_id" && !device.power_entity) {
@@ -1008,6 +1106,7 @@ class WandRemoteCardEditor extends HTMLElement {
     device.remote_id = config.remote_id || device.remote_id || "";
     device.media_player_id = config.media_player_id || device.media_player_id || "";
     device.platform = config.platform || device.platform || "";
+    device.source_name = device.source_name || config.source || config.platform || device.name || "";
     device.power_entity = device.power_entity || device.media_player_id || device.remote_id || "";
     this._syncDeviceCardConfig();
     this._changed(render);
@@ -1102,6 +1201,9 @@ class WandRemoteCardEditor extends HTMLElement {
       remote_id: "",
       media_player_id: "",
       power_entity: "",
+      source_entity_id: "",
+      source_name: "New Device",
+      auto_select_source: true,
       card_config: {
         type: this._config.universal_remote_card_type || "custom:universal-remote-card",
         custom_actions: [],
@@ -1128,13 +1230,21 @@ class WandRemoteCardEditor extends HTMLElement {
   _styles() {
     return `
       .editor { display:grid; gap:14px; color:var(--primary-text-color); }
-      section { display:grid; gap:12px; padding:14px; border:1px solid var(--divider-color); border-radius:12px; }
+      section { display:grid; gap:12px; }
+      .editor-card { padding:16px; border:1px solid var(--divider-color); border-radius:14px; background:color-mix(in srgb, var(--card-background-color) 88%, transparent); }
+      .section-title { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+      .section-title h3 { margin:0 0 4px; }
+      .section-title p { margin:0; color:var(--secondary-text-color); font-size:12px; line-height:1.35; }
       h3 { margin:0; font-size:14px; letter-spacing:0; }
       label { display:grid; gap:6px; font-size:12px; font-weight:700; color:var(--secondary-text-color); }
       input, select, textarea { width:100%; min-height:40px; border:1px solid var(--divider-color); border-radius:10px; padding:9px 10px; background:var(--card-background-color); color:var(--primary-text-color); font:inherit; }
       textarea { min-height:160px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; font-size:12px; }
       .toolbar { display:grid; grid-template-columns:1fr auto auto; gap:8px; align-items:center; }
       button { border:1px solid var(--divider-color); border-radius:10px; padding:10px 12px; background:var(--card-background-color); color:var(--primary-text-color); font-weight:700; cursor:pointer; }
+      button:hover { background:color-mix(in srgb, var(--primary-color) 10%, var(--card-background-color)); }
+      .field-grid { display:grid; gap:10px; }
+      .field-grid.two { grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); }
+      .field-grid.three { grid-template-columns:repeat(auto-fit, minmax(145px, 1fr)); }
       .quick-actions { display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:8px; }
       .section-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
       .rows-builder { display:grid; gap:10px; }
@@ -1146,8 +1256,14 @@ class WandRemoteCardEditor extends HTMLElement {
       .toggles { display:grid; grid-template-columns:repeat(auto-fit, minmax(190px, 1fr)); gap:8px; }
       .check { display:flex; align-items:center; gap:8px; color:var(--primary-text-color); }
       .check input { width:auto; min-height:auto; }
-      details { border:1px solid var(--divider-color); border-radius:10px; padding:10px; display:grid; gap:10px; }
-      summary { cursor:pointer; font-weight:800; color:var(--primary-text-color); }
+      details { border:1px solid var(--divider-color); border-radius:12px; padding:0; display:grid; gap:10px; overflow:hidden; background:color-mix(in srgb, var(--card-background-color) 70%, transparent); }
+      details[open] { padding-bottom:10px; }
+      summary { cursor:pointer; font-weight:800; color:var(--primary-text-color); padding:12px; list-style:none; }
+      summary::-webkit-details-marker { display:none; }
+      summary::after { content:"+"; float:right; color:var(--secondary-text-color); }
+      details[open] > summary::after { content:"-"; }
+      details > label, details > .toggles, details > .rows-builder, details > .nested-editor { margin:0 10px; }
+      .sub-details { background:transparent; }
       details label { margin-top:10px; }
     `;
   }
