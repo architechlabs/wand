@@ -1,4 +1,4 @@
-const VERSION = "0.8.0";
+const VERSION = "0.8.2";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -12,6 +12,7 @@ const DEFAULT_CONFIG = {
   layout: "tabs",
   show_power_bar: true,
   show_entity_status: true,
+  show_media_preview: true,
   show_unavailable_devices: true,
   persist_navigation: true,
   use_universal_remote_card: true,
@@ -38,7 +39,7 @@ const DEFAULT_CONFIG = {
           source_entity_id: "",
           source_name: "Apple TV",
           home_on_select: true,
-          home_command: "home",
+          home_command: "auto",
           switch_action: null,
           power_on_action: null,
           power_off_action: null,
@@ -214,7 +215,7 @@ class WandRemoteCard extends HTMLElement {
       source_name: device.source_name || device.name || cardConfig.platform || "",
       auto_select_source: device.auto_select_source ?? true,
       home_on_select: device.home_on_select ?? true,
-      home_command: device.home_command || "home",
+      home_command: device.home_command || "auto",
       availability_entities: device.availability_entities || [],
       switch_action: device.switch_action || null,
       power_on_action: device.power_on_action || null,
@@ -258,6 +259,20 @@ class WandRemoteCard extends HTMLElement {
   _currentSource(room) {
     const entityId = this._roomSourceEntity(room);
     return this._entityAttributes(entityId).source || this._entityAttributes(entityId).app_name || "";
+  }
+
+  _mediaPreview(device) {
+    const attrs = this._entityAttributes(device?.media_player_id) || {};
+    const roomAttrs = this._entityAttributes(this._roomSourceEntity(this._currentRoom())) || {};
+    const picture = attrs.entity_picture || roomAttrs.entity_picture || "";
+    const title = attrs.media_title || attrs.app_name || roomAttrs.media_title || roomAttrs.app_name || "";
+    return { picture: this._mediaUrl(picture), title };
+  }
+
+  _mediaUrl(path) {
+    if (!path) return "";
+    if (/^https?:\/\//i.test(path)) return path;
+    return typeof this._hass?.hassUrl === "function" ? this._hass.hassUrl(path) : path;
   }
 
   _sourceMatches(device, room = this._currentRoom()) {
@@ -454,17 +469,20 @@ class WandRemoteCard extends HTMLElement {
     const state = this._isUnavailable(device) ? "Unavailable" : this._isOn(device) ? "On" : "Off";
     const source = this._currentSource(this._currentRoom());
     const isSourceActive = this._sourceMatches(device);
+    const preview = this._config.show_media_preview ? this._mediaPreview(device) : {};
     const chips = [
       isSourceActive ? `<span class="active">Active source</span>` : "",
+      preview.title ? `<span>${this._escape(preview.title)}</span>` : "",
       source ? `<span>${this._escape(source)}</span>` : ""
     ].filter(Boolean).join("");
     return `
       <section class="device-header" style="--device-accent:${this._escape(device.accent)}">
-        <div>
+        <div class="control-copy">
           <p>Now controlling</p>
           <h3>${this._escape(device.name)}</h3>
           ${chips ? `<div class="control-chips">${chips}</div>` : ""}
         </div>
+        ${preview.picture ? `<img class="media-preview" src="${this._escape(preview.picture)}" alt="">` : ""}
         <button class="power-device ${state.toLowerCase()}" data-device-power title="Device power">
           <ha-icon icon="mdi:power"></ha-icon>
         </button>
@@ -573,14 +591,35 @@ class WandRemoteCard extends HTMLElement {
 
   async _sendDeviceHome(device) {
     if (!this._hass || !device) return;
-    const command = device.home_command || "home";
-    if (device.remote_id && command) {
-      await this._hass.callService("remote", "send_command", { entity_id: device.remote_id, command });
+    const commands = this._homeCommandsForDevice(device);
+    if (device.remote_id && commands.length) {
+      for (const command of commands) {
+        try {
+          await this._hass.callService("remote", "send_command", { entity_id: device.remote_id, command });
+          return;
+        } catch (err) {
+          // Try the next platform-specific key name. Some integrations reject generic "home".
+        }
+      }
       return;
     }
     if (device.media_player_id) {
       await this._hass.callService("homeassistant", "turn_on", { entity_id: device.media_player_id });
     }
+  }
+
+  _homeCommandsForDevice(device) {
+    const custom = String(device.home_command || "auto").trim();
+    if (custom && !["auto", "home"].includes(custom.toLowerCase())) return [custom];
+
+    const platform = String(device.platform || device.name || "").toLowerCase();
+    const candidates = [];
+    if (platform.includes("samsung")) candidates.push("KEY_HOME", "HOME");
+    else if (platform.includes("google") || platform.includes("android") || platform.includes("fire")) candidates.push("HOME", "KEYCODE_HOME");
+    else if (platform.includes("apple")) candidates.push("home", "HOME");
+    else if (platform.includes("roku")) candidates.push("home", "HOME");
+    else candidates.push("home", "HOME", "KEY_HOME");
+    return [...new Set(candidates.filter(Boolean))];
   }
 
   async _setDevicePower(device, mode) {
@@ -693,6 +732,8 @@ class WandRemoteCard extends HTMLElement {
         background:linear-gradient(135deg, color-mix(in srgb, var(--device-accent) 15%, ${theme.panel}), ${theme.panel});
         border:1px solid color-mix(in srgb, var(--device-accent) 36%, ${theme.border});
       }
+      .control-copy { min-width:0; flex:1 1 auto; }
+      .media-preview { width:58px; height:58px; flex:0 0 auto; border-radius:14px; object-fit:cover; border:1px solid ${theme.border}; background:${theme.panel}; box-shadow:0 10px 26px ${theme.shadow}; }
       .control-chips { display:flex; gap:8px; flex-wrap:wrap; margin-top:9px; }
       .control-chips span { max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:5px 8px; border-radius:999px; background:${theme.panel}; border:1px solid ${theme.border}; color:${theme.muted}; font-size:11px; font-weight:800; }
       .control-chips .active { color:#22c55e; border-color:rgba(34,197,94,.42); background:rgba(34,197,94,.10); }
@@ -760,6 +801,7 @@ class WandRemoteCardEditor extends HTMLElement {
               ${this._toggle("use_universal_remote_card", "Embed universal-remote-card")}
               ${this._toggle("show_power_bar", "Show room power")}
               ${this._toggle("show_entity_status", "Show status")}
+              ${this._toggle("show_media_preview", "Show media preview")}
               ${this._toggle("show_unavailable_devices", "Show unavailable devices")}
               ${this._toggle("persist_navigation", "Remember selected area")}
             </div>
@@ -875,7 +917,7 @@ class WandRemoteCardEditor extends HTMLElement {
         <label class="check"><input type="checkbox" data-device-check="use_universal_remote_card" ${device.use_universal_remote_card ?? this._config.use_universal_remote_card ? "checked" : ""}> Use universal-remote-card for this device</label>
         <label class="check"><input type="checkbox" data-device-check="auto_select_source" ${device.auto_select_source ? "checked" : ""}> Select source when tapped</label>
         <label class="check"><input type="checkbox" data-device-check="home_on_select" ${device.home_on_select ? "checked" : ""}> Send Home when tapped</label>
-        <label>Home command<input data-device="home_command" value="${this._escape(device.home_command || "home")}" placeholder="home"></label>
+        <label>Home command<input data-device="home_command" value="${this._escape(device.home_command || "auto")}" placeholder="auto"></label>
       </section>
 
       <section class="editor-card">
@@ -1239,7 +1281,7 @@ class WandRemoteCardEditor extends HTMLElement {
       source_name: "New Device",
       auto_select_source: true,
       home_on_select: true,
-      home_command: "home",
+      home_command: "auto",
       card_config: {
         type: this._config.universal_remote_card_type || "custom:universal-remote-card",
         custom_actions: [],
