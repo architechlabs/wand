@@ -38,14 +38,14 @@ If the card does not appear in the picker, add the frontend resource manually:
 
 ```text
 Settings -> Dashboards -> three dots -> Resources -> Add Resource
-URL: /wand_remote/wand-remote-card.js?v=0.2.0
+URL: /wand_remote/wand-remote-card.js?v=0.3.0
 Resource type: JavaScript module
 ```
 
 Then hard refresh the browser and reopen the card picker. You can also test whether the file is being served by opening:
 
 ```text
-http://YOUR_HA_ADDRESS:8123/wand_remote/wand-remote-card.js?v=0.2.0
+http://YOUR_HA_ADDRESS:8123/wand_remote/wand-remote-card.js?v=0.3.0
 ```
 
 If that URL returns 404, the integration has not been added in **Devices & services** or Home Assistant has not restarted after installation.
@@ -70,7 +70,7 @@ The `/wand_remote/wand-remote-card.js` route is created by the backend integrati
 - Home Assistant has restarted
 - **Wand Universal Remote** has been added in **Settings -> Devices & services**
 
-For pure frontend/HACS card usage, use `/hacsfiles/wand/wand-remote-card.js` instead.
+For pure frontend/HACS card usage, use `/hacsfiles/wand/wand.js` instead.
 
 ## Recommended model
 

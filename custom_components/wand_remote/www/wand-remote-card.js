@@ -1,4 +1,4 @@
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -150,8 +150,10 @@ class WandRemoteCard extends HTMLElement {
 
   setConfig(config) {
     this._config = this._normalizeConfig(config);
-    this._selectedRoom = this._selectedRoom || this._config.rooms?.[0]?.id;
-    this._selectedDevice = this._selectedDevice || this._currentRoom()?.devices?.[0]?.id;
+    if (this._selectedRoom && !this._config.rooms?.some((room) => room.id === this._selectedRoom)) {
+      this._selectedRoom = null;
+      this._selectedDevice = null;
+    }
     this._render();
   }
 
@@ -211,7 +213,8 @@ class WandRemoteCard extends HTMLElement {
   }
 
   _currentRoom() {
-    return (this._config.rooms || []).find((room) => room.id === this._selectedRoom) || this._config.rooms?.[0];
+    if (!this._selectedRoom) return null;
+    return (this._config.rooms || []).find((room) => room.id === this._selectedRoom) || null;
   }
 
   _visibleDevices(room) {
@@ -257,25 +260,28 @@ class WandRemoteCard extends HTMLElement {
     const theme = THEMES[this._config.theme] || THEMES.midnight;
     const accent = device?.accent || room?.accent || "#38bdf8";
     const roomPower = this._roomPowerState(room);
+    const isLanding = !room;
 
     this.shadowRoot.innerHTML = `
       <style>${this._styles(theme, accent)}</style>
-      <ha-card class="wrap">
-        <header>
-          <div class="title">
-            <p>${this._escape(this._config.title || "Universal Remote")}</p>
-            <h2>${this._escape(room?.name || "Select room")}</h2>
-          </div>
-          <div class="header-actions">
-            ${this._config.show_entity_status ? `<span class="badge ${roomPower}">${this._escape(roomPower)}</span>` : ""}
-            ${this._config.show_power_bar ? `<button class="power-room ${roomPower}" data-room-power title="Room power"><ha-icon icon="mdi:power"></ha-icon></button>` : ""}
-          </div>
-        </header>
+      <ha-card class="wrap ${isLanding ? "landing-wrap" : "control-wrap"}">
+        ${isLanding ? this._landingPage() : `
+          <header class="control-header">
+            <button class="back" data-back title="Areas"><ha-icon icon="mdi:chevron-left"></ha-icon></button>
+            <div class="title">
+              <p>${this._escape(this._config.title || "Universal Remote")}</p>
+              <h2>${this._escape(room.name)}</h2>
+            </div>
+            <div class="header-actions">
+              ${this._config.show_entity_status ? `<span class="badge ${roomPower}">${this._escape(roomPower)}</span>` : ""}
+              ${this._config.show_power_bar ? `<button class="power-room ${roomPower}" data-room-power title="Room power"><ha-icon icon="mdi:power"></ha-icon></button>` : ""}
+            </div>
+          </header>
 
-        <section class="rooms">${(this._config.rooms || []).map((item) => this._roomButton(item)).join("")}</section>
-        ${room ? `<section class="devices">${this._visibleDevices(room).map((item) => this._deviceButton(item)).join("")}</section>` : ""}
-        ${device ? this._deviceHeader(device) : `<div class="empty">Add a room and device in the visual editor.</div>`}
-        <section id="remote-host" class="remote-host">${device ? this._fallbackRemote(device) : ""}</section>
+          <section class="device-strip">${this._visibleDevices(room).map((item) => this._deviceButton(item)).join("")}</section>
+          ${device ? this._deviceHeader(device) : `<div class="empty">Add a device for ${this._escape(room.name)} in the visual editor.</div>`}
+          <section id="remote-host" class="remote-host">${device ? this._fallbackRemote(device) : ""}</section>
+        `}
       </ha-card>
     `;
 
@@ -286,6 +292,13 @@ class WandRemoteCard extends HTMLElement {
         this._embeddedCard = null;
         this._render();
       });
+    });
+
+    this.shadowRoot.querySelector("[data-back]")?.addEventListener("click", () => {
+      this._selectedRoom = null;
+      this._selectedDevice = null;
+      this._embeddedCard = null;
+      this._render();
     });
 
     this.shadowRoot.querySelectorAll("[data-device]").forEach((button) => {
@@ -303,7 +316,37 @@ class WandRemoteCard extends HTMLElement {
       button.addEventListener("click", () => this._callFallbackAction(device, button.dataset.fallbackAction));
     });
 
-    this._renderEmbeddedRemote(device);
+    if (!isLanding) this._renderEmbeddedRemote(device);
+  }
+
+  _landingPage() {
+    return `
+      <header class="landing-header">
+        <div class="title">
+          <p>${this._escape(this._config.title || "Universal Remote")}</p>
+          <h2>Choose Area</h2>
+        </div>
+      </header>
+      <section class="area-grid">
+        ${(this._config.rooms || []).map((room) => this._areaCard(room)).join("")}
+      </section>
+    `;
+  }
+
+  _areaCard(room) {
+    const state = this._roomPowerState(room);
+    const devices = room.devices?.length || 0;
+    const active = (room.devices || []).filter((device) => this._isOn(device)).length;
+    return `
+      <button class="area-card" data-room="${this._escape(room.id)}" style="--item-accent:${this._escape(room.accent)}">
+        <span class="area-icon"><ha-icon icon="${this._escape(room.icon)}"></ha-icon></span>
+        <span class="area-copy">
+          <strong>${this._escape(room.name)}</strong>
+          <small>${devices} device${devices === 1 ? "" : "s"} · ${active} active</small>
+        </span>
+        <i class="${state}"></i>
+      </button>
+    `;
   }
 
   _roomButton(room) {
@@ -475,6 +518,9 @@ class WandRemoteCard extends HTMLElement {
       }
       header, .header-actions, .device-header { display:flex; align-items:center; gap:12px; }
       header { justify-content:space-between; margin-bottom:16px; }
+      .landing-wrap { min-height:260px; }
+      .landing-header { margin-bottom:18px; }
+      .control-header { display:grid; grid-template-columns:auto 1fr auto; }
       .title { min-width:0; }
       p { margin:0 0 4px; color:${theme.muted}; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:1.8px; }
       h2, h3 { margin:0; line-height:1.1; letter-spacing:0; }
@@ -482,6 +528,10 @@ class WandRemoteCard extends HTMLElement {
       h3 { font-size:20px; }
       small { display:block; margin-top:5px; color:${theme.muted}; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       button { font:inherit; color:inherit; border:0; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+      .back {
+        width:42px; height:42px; border-radius:50%; display:grid; place-items:center; background:${theme.panel}; border:1px solid ${theme.border};
+        transition:transform .16s ease, background .16s ease;
+      }
       .badge { padding:7px 10px; border-radius:999px; border:1px solid ${theme.border}; background:${theme.panel}; color:${theme.muted}; font-size:11px; font-weight:800; text-transform:uppercase; }
       .badge.on, .badge.issue { color:${theme.text}; border-color:color-mix(in srgb, var(--accent) 45%, ${theme.border}); }
       .power-room, .power-device {
@@ -489,20 +539,34 @@ class WandRemoteCard extends HTMLElement {
         transition:transform .16s ease, background .16s ease, border-color .16s ease;
       }
       .power-room.on, .power-device.on { background:color-mix(in srgb, var(--accent) 24%, ${theme.panelStrong}); border-color:color-mix(in srgb, var(--accent) 62%, ${theme.border}); }
-      .rooms, .devices { display:grid; gap:10px; margin-bottom:14px; }
-      .rooms { grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); }
-      .devices { grid-template-columns:repeat(auto-fit, minmax(82px, 1fr)); }
-      .room, .device {
+      .area-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:12px; }
+      .area-card {
+        position:relative; min-height:116px; padding:18px; border-radius:22px; display:flex; align-items:center; gap:16px; text-align:left;
+        background:linear-gradient(135deg, color-mix(in srgb, var(--item-accent) 12%, ${theme.panel}), ${theme.panel});
+        border:1px solid ${theme.border}; backdrop-filter:blur(18px);
+        transition:transform .18s ease, background .18s ease, border-color .18s ease, box-shadow .18s ease;
+      }
+      .area-card:hover { background:linear-gradient(135deg, color-mix(in srgb, var(--item-accent) 18%, ${theme.panelStrong}), ${theme.panelStrong}); border-color:color-mix(in srgb, var(--item-accent) 44%, ${theme.border}); }
+      .area-card:active, .back:active { transform:scale(.96); }
+      .area-icon {
+        width:56px; height:56px; flex:0 0 auto; display:grid; place-items:center; border-radius:18px;
+        background:color-mix(in srgb, var(--item-accent) 18%, ${theme.panelStrong}); border:1px solid color-mix(in srgb, var(--item-accent) 40%, ${theme.border});
+      }
+      .area-icon ha-icon { color:var(--item-accent); --mdc-icon-size:32px; }
+      .area-copy { min-width:0; display:grid; gap:5px; }
+      .area-copy strong { font-size:16px; line-height:1.15; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .area-copy small { margin:0; }
+      .device-strip { display:grid; grid-template-columns:repeat(auto-fit, minmax(92px, 1fr)); gap:10px; margin-bottom:14px; }
+      .device {
         position:relative; min-height:76px; border-radius:18px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px;
         background:${theme.panel}; border:1px solid ${theme.border}; backdrop-filter:blur(18px);
         transition:transform .18s ease, background .18s ease, border-color .18s ease, box-shadow .18s ease;
       }
-      .room:hover, .device:hover, .action:hover, .power-room:hover, .power-device:hover { background:${theme.panelStrong}; }
-      .room:active, .device:active, .action:active, .power-room:active, .power-device:active { transform:scale(.96); }
-      .room.selected, .device.selected { border-color:color-mix(in srgb, var(--item-accent) 62%, transparent); box-shadow:0 0 0 3px color-mix(in srgb, var(--item-accent) 15%, transparent); }
-      .room ha-icon { color:var(--item-accent); --mdc-icon-size:30px; }
+      .device:hover, .action:hover, .power-room:hover, .power-device:hover, .back:hover { background:${theme.panelStrong}; }
+      .device:active, .action:active, .power-room:active, .power-device:active { transform:scale(.96); }
+      .device.selected { border-color:color-mix(in srgb, var(--item-accent) 62%, transparent); box-shadow:0 0 0 3px color-mix(in srgb, var(--item-accent) 15%, transparent); background:linear-gradient(135deg, color-mix(in srgb, var(--item-accent) 22%, ${theme.panelStrong}), ${theme.panelStrong}); }
       .device ha-icon { color:var(--item-accent); --mdc-icon-size:26px; }
-      .room span, .device span { max-width:100%; padding:0 8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:760; }
+      .device span { max-width:100%; padding:0 8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:760; }
       .device span { font-size:12px; color:${theme.muted}; }
       i { position:absolute; top:9px; right:9px; width:8px; height:8px; border-radius:50%; background:${theme.border}; }
       i.on { background:#22c55e; box-shadow:0 0 0 4px rgba(34,197,94,.12); }
@@ -523,10 +587,11 @@ class WandRemoteCard extends HTMLElement {
       .empty { padding:28px; text-align:center; color:${theme.muted}; border:1px dashed ${theme.border}; border-radius:18px; }
       @media (max-width: 520px) {
         .wrap { padding:16px; border-radius:20px; }
-        header { align-items:flex-start; }
+        .control-header { grid-template-columns:auto 1fr; }
+        .header-actions { grid-column:1 / -1; justify-content:flex-end; }
         h2 { font-size:21px; }
-        .rooms { grid-template-columns:repeat(auto-fit, minmax(115px, 1fr)); }
-        .devices { grid-template-columns:repeat(auto-fit, minmax(74px, 1fr)); }
+        .area-grid { grid-template-columns:1fr; }
+        .device-strip { grid-template-columns:repeat(auto-fit, minmax(74px, 1fr)); }
       }
     `;
   }
