@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import logging
 from typing import Any
 
 from homeassistant.components.http import StaticPathConfig
@@ -11,9 +12,10 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers.typing import ConfigType
 
-from .const import CARD_FILENAME, CARD_URL, DOMAIN, STATIC_URL_PATH
+from .const import CARD_FILENAME, CARD_URL, DOMAIN, STATIC_URL_PATH, VERSION
 
 PLATFORMS: list[Platform] = []
+LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -47,8 +49,9 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
         [StaticPathConfig(STATIC_URL_PATH, str(card_dir), cache_headers=True)]
     )
 
-    await _async_register_lovelace_resource(hass, f"{CARD_URL}?v=0.1.0")
+    await _async_register_lovelace_resource(hass, f"{CARD_URL}?v={VERSION}")
     hass.data[DOMAIN]["frontend_registered"] = True
+    LOGGER.info("Wand Universal Remote frontend served at %s?v=%s", CARD_URL, VERSION)
 
 
 async def _async_register_lovelace_resource(hass: HomeAssistant, url: str) -> None:
@@ -62,6 +65,7 @@ async def _async_register_lovelace_resource(hass: HomeAssistant, url: str) -> No
         existing = await resources.async_get_info(hass)
         for item in existing.get("resources", []):
             if str(item.get("url", "")).split("?")[0] == CARD_URL:
+                LOGGER.info("Wand Universal Remote Lovelace resource already exists")
                 return
 
         await resources.async_create_item(
@@ -71,34 +75,47 @@ async def _async_register_lovelace_resource(hass: HomeAssistant, url: str) -> No
                 "url": url,
             },
         )
-    except Exception:
+        LOGGER.info("Wand Universal Remote Lovelace resource registered: %s", url)
+    except Exception as err:
         # Resource APIs can vary between HA versions and storage modes. The card is
         # still served; users can manually add CARD_URL as a module if needed.
+        LOGGER.warning(
+            "Could not auto-register Wand Universal Remote Lovelace resource. "
+            "Add %s as a JavaScript module resource manually. Error: %s",
+            url,
+            err,
+        )
         return
 
 
 def _async_register_services(hass: HomeAssistant) -> None:
     """Register small helper services used by advanced card actions."""
-    if hass.services.has_service(DOMAIN, "call_action"):
+    if not hass.services.has_service(DOMAIN, "call_action"):
+
+        async def _async_call_action(call: ServiceCall) -> None:
+            data: dict[str, Any] = dict(call.data)
+            domain = data.pop("domain", None)
+            service = data.pop("service", None)
+            target = data.pop("target", None)
+            service_data = data.pop("service_data", {})
+
+            if not domain or not service:
+                return
+
+            await hass.services.async_call(
+                domain,
+                service,
+                service_data,
+                target=target,
+                blocking=False,
+            )
+
+        hass.services.async_register(DOMAIN, "call_action", _async_call_action)
+
+    if hass.services.has_service(DOMAIN, "reload_frontend"):
         return
 
-    async def _async_call_action(call: ServiceCall) -> None:
-        data: dict[str, Any] = dict(call.data)
-        domain = data.pop("domain", None)
-        service = data.pop("service", None)
-        target = data.pop("target", None)
-        service_data = data.pop("service_data", {})
+    async def _async_reload_frontend(call: ServiceCall) -> None:
+        await _async_register_frontend(hass)
 
-        if not domain or not service:
-            return
-
-        await hass.services.async_call(
-            domain,
-            service,
-            service_data,
-            target=target,
-            blocking=False,
-        )
-
-    hass.services.async_register(DOMAIN, "call_action", _async_call_action)
-
+    hass.services.async_register(DOMAIN, "reload_frontend", _async_reload_frontend)

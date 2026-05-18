@@ -23,3 +23,6 @@ call_action:
       selector:
         object:
 
+reload_frontend:
+  name: Reload frontend
+  description: Re-registers the Wand Universal Remote static path and Lovelace resource.
