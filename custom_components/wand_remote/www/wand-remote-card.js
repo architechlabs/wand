@@ -1,4 +1,4 @@
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -700,6 +700,7 @@ class WandRemoteCardEditor extends HTMLElement {
 
     this._bindEvents();
     this._refreshEntityLists();
+    this._mountUniversalRemoteEditor(device);
   }
 
   _roomEditor(room) {
@@ -722,6 +723,10 @@ class WandRemoteCardEditor extends HTMLElement {
         <label>Name<input data-device="name" value="${this._escape(device.name || "")}"></label>
         <label>Icon<input data-device="icon" value="${this._escape(device.icon || "")}"></label>
         <label>Accent<input type="color" data-device="accent" value="${this._escape(device.accent || "#38bdf8")}"></label>
+      </section>
+
+      <section>
+        <h3>Universal Remote</h3>
         <label>Platform<select data-device="platform">
           ${["", "Apple TV", "Samsung TV", "Denon AVR", "Tata Play", "Google TV", "Fire TV", "Roku", "Kodi", "Android TV", "Generic"].map((name) => `<option value="${this._escape(name)}" ${device.platform === name ? "selected" : ""}>${this._escape(name || "Auto / custom")}</option>`).join("")}
         </select></label>
@@ -732,13 +737,61 @@ class WandRemoteCardEditor extends HTMLElement {
           <button data-sync-card-config>Sync from card config</button>
           <button data-use-media-power>Use media player for power</button>
         </div>
+        ${this._rowsEditor(device)}
+        <details open>
+          <summary>Universal remote-card editor</summary>
+          <div class="nested-editor" data-universal-editor>
+            <div class="notice">If the installed universal-remote-card exposes its own editor, it appears here. Otherwise use the fields above.</div>
+          </div>
+        </details>
+      </section>
+
+      <section>
+        <h3>Behavior</h3>
         ${this._actionEditor("device-switch", "Run when selected", device.switch_action)}
         ${this._actionEditor("device-power-on", "Power on action", device.power_on_action)}
         ${this._actionEditor("device-power-off", "Power off action", device.power_off_action)}
         <label class="check"><input type="checkbox" data-device-check="hidden_when_off" ${device.hidden_when_off ? "checked" : ""}> Hide when unavailable filter is active</label>
         <label class="check"><input type="checkbox" data-device-check="use_universal_remote_card" ${device.use_universal_remote_card ?? this._config.use_universal_remote_card ? "checked" : ""}> Use universal-remote-card for this device</label>
+      </section>
+
+      <section>
+        <h3>Advanced YAML Bridge</h3>
         <label>Universal remote card config<textarea data-device-json="card_config">${this._escape(JSON.stringify(device.card_config || this._deviceToCardConfig(device), null, 2))}</textarea></label>
       </section>
+    `;
+  }
+
+  _rowsEditor(device) {
+    const rows = this._cardRows(device);
+    const options = ["back", "power", "home", "menu", "touchpad", "volume_buttons", "rewind", "previous", "play_pause", "next", "fast_forward", "channel_up", "channel_down", "up", "down", "left", "right", "select", "n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8", "n9"];
+    return `
+      <div class="rows-builder">
+        <div class="section-head">
+          <strong>Remote buttons</strong>
+          <button data-add-remote-row>Add row</button>
+        </div>
+        ${rows.map((row, rowIndex) => `
+          <div class="remote-row-editor">
+            <span>Row ${rowIndex + 1}</span>
+            ${(Array.isArray(row) ? row : [row]).map((item, actionIndex) => {
+              const key = Array.isArray(item) ? item[0] : item;
+              return `
+                <label>
+                  <select data-remote-row-action="${rowIndex}:${actionIndex}">
+                    ${options.map((option) => `<option value="${option}" ${key === option ? "selected" : ""}>${this._escape(option.replaceAll("_", " "))}</option>`).join("")}
+                  </select>
+                  <button data-remove-remote-action="${rowIndex}:${actionIndex}">Remove</button>
+                </label>
+              `;
+            }).join("")}
+            <div class="quick-actions">
+              <button data-add-remote-action="${rowIndex}">Add button</button>
+              <button data-remove-remote-row="${rowIndex}">Remove row</button>
+            </div>
+          </div>
+        `).join("")}
+      </div>
     `;
   }
 
@@ -806,6 +859,11 @@ class WandRemoteCardEditor extends HTMLElement {
     }));
     this.shadowRoot.querySelectorAll("[data-device-json]").forEach((input) => input.addEventListener("change", () => this._updateJson(input)));
     this.shadowRoot.querySelectorAll("[data-action-service],[data-action-target],[data-action-data]").forEach((input) => input.addEventListener("change", () => this._updateAction(input)));
+    this.shadowRoot.querySelectorAll("[data-remote-row-action]").forEach((input) => input.addEventListener("change", () => this._updateRemoteRowAction(input)));
+    this.shadowRoot.querySelectorAll("[data-add-remote-action]").forEach((button) => button.addEventListener("click", () => this._addRemoteAction(Number(button.dataset.addRemoteAction))));
+    this.shadowRoot.querySelectorAll("[data-remove-remote-action]").forEach((button) => button.addEventListener("click", () => this._removeRemoteAction(button.dataset.removeRemoteAction)));
+    this.shadowRoot.querySelector("[data-add-remote-row]")?.addEventListener("click", () => this._addRemoteRow());
+    this.shadowRoot.querySelectorAll("[data-remove-remote-row]").forEach((button) => button.addEventListener("click", () => this._removeRemoteRow(Number(button.dataset.removeRemoteRow))));
     this.shadowRoot.querySelector("[data-add-room]")?.addEventListener("click", () => this._addRoom());
     this.shadowRoot.querySelector("[data-remove-room]")?.addEventListener("click", () => this._removeRoom());
     this.shadowRoot.querySelector("[data-add-device]")?.addEventListener("click", () => this._addDevice());
@@ -824,6 +882,28 @@ class WandRemoteCardEditor extends HTMLElement {
     this.shadowRoot.querySelectorAll("datalist").forEach((list) => {
       const input = this.shadowRoot.querySelector(`[list="${list.id}"]`);
       list.innerHTML = this._entityOptions(input?.dataset.domain || "");
+    });
+  }
+
+  _mountUniversalRemoteEditor(device) {
+    const host = this.shadowRoot?.querySelector("[data-universal-editor]");
+    if (!host || !device) return;
+
+    const cardConfig = this._deviceToCardConfig(device);
+    const elementName = String(cardConfig.type || "custom:universal-remote-card").replace(/^custom:/, "");
+    const cardClass = customElements.get(elementName);
+    const editorFactory = cardClass?.getConfigElement;
+    const editorElement = typeof editorFactory === "function" ? editorFactory.call(cardClass) : customElements.get(`${elementName}-editor`) ? document.createElement(`${elementName}-editor`) : null;
+
+    if (!editorElement) return;
+
+    host.replaceChildren(editorElement);
+    if (this._hass) editorElement.hass = this._hass;
+    if (typeof editorElement.setConfig === "function") editorElement.setConfig(cardConfig);
+    editorElement.addEventListener("config-changed", (event) => {
+      const deviceRef = this._device();
+      deviceRef.card_config = event.detail?.config || deviceRef.card_config || {};
+      this._syncFromCardConfig(false);
     });
   }
 
@@ -858,6 +938,56 @@ class WandRemoteCardEditor extends HTMLElement {
     }
     this._syncDeviceCardConfig();
     this._changed();
+  }
+
+  _cardRows(device = this._device()) {
+    const rows = device.card_config?.rows || device.rows || DEFAULT_REMOTE_ROWS;
+    return clone(rows);
+  }
+
+  _setCardRows(rows) {
+    const device = this._device();
+    device.card_config = {
+      ...(device.card_config || this._deviceToCardConfig(device)),
+      rows
+    };
+    device.rows = rows;
+    this._changed(true);
+  }
+
+  _updateRemoteRowAction(input) {
+    const [rowIndex, actionIndex] = input.dataset.remoteRowAction.split(":").map(Number);
+    const rows = this._cardRows();
+    rows[rowIndex][actionIndex] = input.value === "volume_buttons" ? ["volume_buttons"] : input.value;
+    this._setCardRows(rows);
+  }
+
+  _addRemoteRow() {
+    const rows = this._cardRows();
+    rows.push(["back", "home", "menu"]);
+    this._setCardRows(rows);
+  }
+
+  _removeRemoteRow(rowIndex) {
+    const rows = this._cardRows();
+    if (rows.length <= 1) return;
+    rows.splice(rowIndex, 1);
+    this._setCardRows(rows);
+  }
+
+  _addRemoteAction(rowIndex) {
+    const rows = this._cardRows();
+    rows[rowIndex] = rows[rowIndex] || [];
+    rows[rowIndex].push("select");
+    this._setCardRows(rows);
+  }
+
+  _removeRemoteAction(pointer) {
+    const [rowIndex, actionIndex] = pointer.split(":").map(Number);
+    const rows = this._cardRows();
+    if ((rows[rowIndex] || []).length <= 1) return;
+    rows[rowIndex].splice(actionIndex, 1);
+    this._setCardRows(rows);
   }
 
   _updateJson(input) {
@@ -1006,6 +1136,13 @@ class WandRemoteCardEditor extends HTMLElement {
       .toolbar { display:grid; grid-template-columns:1fr auto auto; gap:8px; align-items:center; }
       button { border:1px solid var(--divider-color); border-radius:10px; padding:10px 12px; background:var(--card-background-color); color:var(--primary-text-color); font-weight:700; cursor:pointer; }
       .quick-actions { display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:8px; }
+      .section-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+      .rows-builder { display:grid; gap:10px; }
+      .remote-row-editor { display:grid; gap:8px; padding:10px; border:1px solid var(--divider-color); border-radius:12px; }
+      .remote-row-editor > span { font-size:12px; font-weight:800; color:var(--secondary-text-color); text-transform:uppercase; letter-spacing:.08em; }
+      .remote-row-editor label { grid-template-columns:1fr auto; align-items:end; }
+      .nested-editor { display:block; margin-top:10px; }
+      .notice { padding:12px; border:1px dashed var(--divider-color); border-radius:10px; color:var(--secondary-text-color); font-size:12px; line-height:1.4; }
       .toggles { display:grid; grid-template-columns:repeat(auto-fit, minmax(190px, 1fr)); gap:8px; }
       .check { display:flex; align-items:center; gap:8px; color:var(--primary-text-color); }
       .check input { width:auto; min-height:auto; }
