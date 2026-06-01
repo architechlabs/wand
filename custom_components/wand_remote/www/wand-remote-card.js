@@ -1,4 +1,4 @@
-const VERSION = "0.8.8";
+const VERSION = "0.8.9";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -1200,6 +1200,11 @@ class WandRemoteCardEditor extends HTMLElement {
     this._bindRowsEditor();
   }
 
+  _refreshNestedEditorConfig() {
+    const editorElement = this.shadowRoot?.querySelector("[data-universal-editor]")?.firstElementChild;
+    if (typeof editorElement?.setConfig === "function") editorElement.setConfig(this._deviceToCardConfig(this._device()));
+  }
+
   _mountUniversalRemoteEditor(device) {
     const host = this.shadowRoot?.querySelector("[data-universal-editor]");
     if (!host || !device) return;
@@ -1220,6 +1225,7 @@ class WandRemoteCardEditor extends HTMLElement {
       const deviceRef = this._device();
       deviceRef.card_config = event.detail?.config || deviceRef.card_config || {};
       this._syncFromCardConfig(false);
+      this._refreshRowsEditor();
     });
   }
 
@@ -1277,6 +1283,7 @@ class WandRemoteCardEditor extends HTMLElement {
     device.rows = rows;
     this._changed();
     this._refreshRowsEditor();
+    this._refreshNestedEditorConfig();
   }
 
   _updateRemoteRowAction(input) {
@@ -1320,6 +1327,10 @@ class WandRemoteCardEditor extends HTMLElement {
       if (input.dataset.deviceJson === "card_config") this._syncFromCardConfig(false);
       input.setCustomValidity("");
       this._changed();
+      if (input.dataset.deviceJson === "card_config") {
+        this._refreshRowsEditor();
+        this._refreshNestedEditorConfig();
+      }
     } catch (err) {
       input.setCustomValidity("Must be valid JSON.");
       input.reportValidity();
@@ -1343,6 +1354,8 @@ class WandRemoteCardEditor extends HTMLElement {
     device.platform = config.platform || device.platform || "";
     device.source_name = this._cleanSourceName(device.source_name) || config.source || config.platform || device.name || "";
     device.power_entity = device.power_entity || device.media_player_id || device.remote_id || "";
+    if (config.rows) device.rows = clone(config.rows);
+    if (config.custom_actions) device.custom_actions = clone(config.custom_actions);
     this._syncDeviceCardConfig();
     this._changed(render);
   }
@@ -1401,12 +1414,13 @@ class WandRemoteCardEditor extends HTMLElement {
 
   _deviceToCardConfig(device) {
     return {
-      type: this._config.universal_remote_card_type || "custom:universal-remote-card",
-      remote_id: device.remote_id || undefined,
-      media_player_id: device.media_player_id || undefined,
-      platform: device.platform || undefined,
-      custom_actions: device.custom_actions || [],
-      rows: device.rows || DEFAULT_REMOTE_ROWS
+      ...(device.card_config || {}),
+      type: device.card_config?.type || this._config.universal_remote_card_type || "custom:universal-remote-card",
+      remote_id: device.remote_id || device.card_config?.remote_id || undefined,
+      media_player_id: device.media_player_id || device.card_config?.media_player_id || undefined,
+      platform: device.platform || device.card_config?.platform || undefined,
+      custom_actions: device.card_config?.custom_actions || device.custom_actions || [],
+      rows: device.card_config?.rows || device.rows || DEFAULT_REMOTE_ROWS
     };
   }
 
