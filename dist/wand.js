@@ -1,4 +1,4 @@
-const VERSION = "0.9.2";
+const VERSION = "0.9.3";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -993,9 +993,9 @@ class WandRemoteCardEditor extends HTMLElement {
           ${this._rowsEditor(device)}
         </details>
         <details>
-          <summary>Advanced universal-remote-card editor</summary>
+          <summary>Universal remote card reference</summary>
           <div class="nested-editor" data-universal-editor>
-            <div class="notice">Use Wand Remote buttons above for reliable layout editing and live preview. Supported changes from the embedded editor are synchronized when its editor exposes them.</div>
+            <div class="notice">Use Wand Remote buttons above for layout editing and live preview. Use Advanced JSON bridge below for universal-remote-card settings not listed above.</div>
           </div>
         </details>
       </section>
@@ -1039,9 +1039,6 @@ class WandRemoteCardEditor extends HTMLElement {
     ];
     return `
       <div class="rows-builder" data-rows-builder>
-        <datalist id="wand-remote-action-options">
-          ${options.map((option) => `<option value="${this._escape(option)}"></option>`).join("")}
-        </datalist>
         <div class="section-head">
           <strong>Remote buttons</strong>
           <button data-add-remote-row>Add row</button>
@@ -1053,7 +1050,9 @@ class WandRemoteCardEditor extends HTMLElement {
               const key = Array.isArray(item) ? item[0] : item;
               return `
                 <label>
-                  <input list="wand-remote-action-options" data-remote-row-action="${rowIndex}:${actionIndex}" value="${this._escape(key)}" placeholder="Choose or type a remote key">
+                  <select data-remote-row-action="${rowIndex}:${actionIndex}">
+                    ${[...new Set([...options, key])].map((option) => `<option value="${this._escape(option)}" ${key === option ? "selected" : ""}>${this._escape(option.replaceAll("_", " "))}</option>`).join("")}
+                  </select>
                   <button data-remove-remote-action="${rowIndex}:${actionIndex}">Remove</button>
                 </label>
               `;
@@ -1249,81 +1248,6 @@ class WandRemoteCardEditor extends HTMLElement {
     host.replaceChildren(editorElement);
     if (this._hass) editorElement.hass = this._hass;
     if (typeof editorElement.setConfig === "function") editorElement.setConfig(cardConfig);
-    editorElement.addEventListener("config-changed", (event) => {
-      event.stopPropagation();
-      if (this._syncingNestedEditor) return;
-      this._commitNestedCardConfig(event.detail?.config || this._nestedEditorConfig(editorElement));
-    });
-    ["input", "change", "focusout", "keyup"].forEach((eventName) => {
-      editorElement.addEventListener(eventName, () => this._scheduleNestedEditorPull(editorElement));
-    });
-    this._bridgeNestedShadowRoots(editorElement);
-  }
-
-  _commitNestedCardConfig(config) {
-    if (!isObject(config)) return;
-    const device = this._device();
-    if (JSON.stringify(config) === JSON.stringify(device.card_config || {})) return;
-    device.card_config = clone(config);
-    device.remote_id = config.remote_id || device.remote_id || "";
-    device.media_player_id = config.media_player_id || device.media_player_id || "";
-    device.platform = config.platform || device.platform || "";
-    device.source_name = this._cleanSourceName(device.source_name) || config.source || config.platform || device.name || "";
-    device.power_entity = device.power_entity || device.media_player_id || device.remote_id || "";
-    if (config.rows) device.rows = clone(config.rows);
-    if (config.custom_actions) device.custom_actions = clone(config.custom_actions);
-    this._syncDeviceCardConfig();
-    this._refreshRowsEditor();
-    this._emitPreviewSelection(false);
-    if (this._nestedCommitQueued) return;
-    this._nestedCommitQueued = true;
-    const enqueue = window.queueMicrotask || ((callback) => Promise.resolve().then(callback));
-    enqueue(() => {
-      this._nestedCommitQueued = false;
-      this._changed();
-    });
-  }
-
-  _nestedEditorConfig(editorElement) {
-    if (!editorElement) return null;
-    if (typeof editorElement.getConfig === "function") {
-      try {
-        const config = editorElement.getConfig();
-        if (isObject(config)) return config;
-      } catch (err) {
-        // Fall through to common editor config properties.
-      }
-    }
-    return isObject(editorElement._config) ? editorElement._config : isObject(editorElement.config) ? editorElement.config : null;
-  }
-
-  _scheduleNestedEditorPull(editorElement) {
-    window.clearTimeout(this._nestedPullTimer);
-    const pull = () => {
-      if (this._syncingNestedEditor) return;
-      this._commitNestedCardConfig(this._nestedEditorConfig(editorElement));
-    };
-    const enqueue = window.queueMicrotask || ((callback) => Promise.resolve().then(callback));
-    enqueue(pull);
-    this._nestedPullTimer = window.setTimeout(() => {
-      pull();
-    }, 0);
-  }
-
-  _bridgeNestedShadowRoots(editorElement, node = editorElement) {
-    const shadow = node?.shadowRoot;
-    if (!shadow) return;
-    this._nestedShadowRoots = this._nestedShadowRoots || new WeakSet();
-    if (!this._nestedShadowRoots.has(shadow)) {
-      this._nestedShadowRoots.add(shadow);
-      shadow.addEventListener("config-changed", () => this._scheduleNestedEditorPull(editorElement), true);
-      ["input", "change", "focusout", "keyup"].forEach((eventName) => {
-        shadow.addEventListener(eventName, () => this._scheduleNestedEditorPull(editorElement), true);
-      });
-      const observer = new MutationObserver(() => this._bridgeNestedShadowRoots(editorElement, node));
-      observer.observe(shadow, { childList: true, subtree: true });
-    }
-    shadow.querySelectorAll("*").forEach((child) => this._bridgeNestedShadowRoots(editorElement, child));
   }
 
   _emitPreviewSelection(notify = true) {
@@ -1599,6 +1523,11 @@ class WandRemoteCardEditor extends HTMLElement {
   }
 
   _changed(render = false) {
+    if (!this._updatingPreviewSelection) {
+      this._updatingPreviewSelection = true;
+      this._emitPreviewSelection(false);
+      this._updatingPreviewSelection = false;
+    }
     this.dispatchEvent(new CustomEvent("config-changed", { detail: { config: clone(this._config) }, bubbles: true, composed: true }));
     if (render) this._render();
   }
