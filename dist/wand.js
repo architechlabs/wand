@@ -1,4 +1,4 @@
-const VERSION = "0.9.0";
+const VERSION = "0.9.1";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -166,6 +166,12 @@ class WandRemoteCard extends HTMLElement {
   setConfig(config) {
     this._config = this._normalizeConfig(config);
     this._restoreSelection();
+    const preview = this._config.editor_preview_selection;
+    if (preview?.nonce && preview.nonce !== this._previewSelectionNonce) {
+      this._previewSelectionNonce = preview.nonce;
+      this._selectedRoom = preview.room_id || this._selectedRoom;
+      this._selectedDevice = preview.device_id || this._selectedDevice;
+    }
     if (this._selectedRoom && !this._config.rooms?.some((room) => room.id === this._selectedRoom)) {
       this._selectedRoom = null;
       this._selectedDevice = null;
@@ -852,6 +858,8 @@ class WandRemoteCardEditor extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     this._refreshEntityLists();
+    const nestedEditor = this.shadowRoot?.querySelector("[data-universal-editor]")?.firstElementChild;
+    if (nestedEditor) nestedEditor.hass = hass;
   }
 
   _render() {
@@ -1137,10 +1145,12 @@ class WandRemoteCardEditor extends HTMLElement {
     this.shadowRoot.querySelector("[data-select-room]")?.addEventListener("change", (event) => {
       this._roomIndex = Number(event.target.value);
       this._deviceIndex = 0;
+      this._emitPreviewSelection();
       this._render();
     });
     this.shadowRoot.querySelector("[data-select-device]")?.addEventListener("change", (event) => {
       this._deviceIndex = Number(event.target.value);
+      this._emitPreviewSelection();
       this._render();
     });
     this.shadowRoot.querySelectorAll("[data-room]").forEach((input) => input.addEventListener("change", () => this._updateRoom(input)));
@@ -1229,13 +1239,17 @@ class WandRemoteCardEditor extends HTMLElement {
     editorElement.addEventListener("config-changed", (event) => {
       event.stopPropagation();
       if (this._syncingNestedEditor) return;
-      this._commitNestedCardConfig(event.detail?.config);
+      this._commitNestedCardConfig(event.detail?.config || this._nestedEditorConfig(editorElement));
+    });
+    ["input", "change", "focusout", "keyup"].forEach((eventName) => {
+      editorElement.addEventListener(eventName, () => this._scheduleNestedEditorPull(editorElement));
     });
   }
 
   _commitNestedCardConfig(config) {
     if (!isObject(config)) return;
     const device = this._device();
+    if (JSON.stringify(config) === JSON.stringify(device.card_config || {})) return;
     device.card_config = clone(config);
     device.remote_id = config.remote_id || device.remote_id || "";
     device.media_player_id = config.media_player_id || device.media_player_id || "";
@@ -1248,10 +1262,48 @@ class WandRemoteCardEditor extends HTMLElement {
     this._refreshRowsEditor();
     if (this._nestedCommitQueued) return;
     this._nestedCommitQueued = true;
-    window.queueMicrotask(() => {
+    const enqueue = window.queueMicrotask || ((callback) => Promise.resolve().then(callback));
+    enqueue(() => {
       this._nestedCommitQueued = false;
       this._changed();
     });
+  }
+
+  _nestedEditorConfig(editorElement) {
+    if (!editorElement) return null;
+    if (typeof editorElement.getConfig === "function") {
+      try {
+        const config = editorElement.getConfig();
+        if (isObject(config)) return config;
+      } catch (err) {
+        // Fall through to common editor config properties.
+      }
+    }
+    return isObject(editorElement._config) ? editorElement._config : isObject(editorElement.config) ? editorElement.config : null;
+  }
+
+  _scheduleNestedEditorPull(editorElement) {
+    window.clearTimeout(this._nestedPullTimer);
+    const pull = () => {
+      if (this._syncingNestedEditor) return;
+      this._commitNestedCardConfig(this._nestedEditorConfig(editorElement));
+    };
+    const enqueue = window.queueMicrotask || ((callback) => Promise.resolve().then(callback));
+    enqueue(pull);
+    this._nestedPullTimer = window.setTimeout(() => {
+      pull();
+    }, 0);
+  }
+
+  _emitPreviewSelection() {
+    const room = this._room();
+    const device = room?.devices?.[this._deviceIndex];
+    this._config.editor_preview_selection = {
+      room_id: room?.id || "",
+      device_id: device?.id || "",
+      nonce: Date.now()
+    };
+    this._changed();
   }
 
   _room() {
