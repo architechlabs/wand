@@ -1,4 +1,4 @@
-const VERSION = "0.8.9";
+const VERSION = "0.9.0";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -1202,7 +1202,13 @@ class WandRemoteCardEditor extends HTMLElement {
 
   _refreshNestedEditorConfig() {
     const editorElement = this.shadowRoot?.querySelector("[data-universal-editor]")?.firstElementChild;
-    if (typeof editorElement?.setConfig === "function") editorElement.setConfig(this._deviceToCardConfig(this._device()));
+    if (typeof editorElement?.setConfig !== "function") return;
+    this._syncingNestedEditor = true;
+    try {
+      editorElement.setConfig(this._deviceToCardConfig(this._device()));
+    } finally {
+      this._syncingNestedEditor = false;
+    }
   }
 
   _mountUniversalRemoteEditor(device) {
@@ -1222,10 +1228,29 @@ class WandRemoteCardEditor extends HTMLElement {
     if (typeof editorElement.setConfig === "function") editorElement.setConfig(cardConfig);
     editorElement.addEventListener("config-changed", (event) => {
       event.stopPropagation();
-      const deviceRef = this._device();
-      deviceRef.card_config = event.detail?.config || deviceRef.card_config || {};
-      this._syncFromCardConfig(false);
-      this._refreshRowsEditor();
+      if (this._syncingNestedEditor) return;
+      this._commitNestedCardConfig(event.detail?.config);
+    });
+  }
+
+  _commitNestedCardConfig(config) {
+    if (!isObject(config)) return;
+    const device = this._device();
+    device.card_config = clone(config);
+    device.remote_id = config.remote_id || device.remote_id || "";
+    device.media_player_id = config.media_player_id || device.media_player_id || "";
+    device.platform = config.platform || device.platform || "";
+    device.source_name = this._cleanSourceName(device.source_name) || config.source || config.platform || device.name || "";
+    device.power_entity = device.power_entity || device.media_player_id || device.remote_id || "";
+    if (config.rows) device.rows = clone(config.rows);
+    if (config.custom_actions) device.custom_actions = clone(config.custom_actions);
+    this._syncDeviceCardConfig();
+    this._refreshRowsEditor();
+    if (this._nestedCommitQueued) return;
+    this._nestedCommitQueued = true;
+    window.queueMicrotask(() => {
+      this._nestedCommitQueued = false;
+      this._changed();
     });
   }
 
