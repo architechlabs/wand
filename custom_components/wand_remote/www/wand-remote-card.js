@@ -1,4 +1,4 @@
-const VERSION = "0.8.6";
+const VERSION = "0.8.8";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -11,8 +11,10 @@ const DEFAULT_CONFIG = {
   theme: "midnight",
   layout: "tabs",
   show_power_bar: true,
+  show_refresh_button: true,
   show_entity_status: true,
   show_media_preview: true,
+  show_now_controlling: true,
   show_unavailable_devices: true,
   persist_navigation: true,
   use_universal_remote_card: true,
@@ -24,8 +26,11 @@ const DEFAULT_CONFIG = {
       icon: "mdi:bed-king",
       accent: "#a78bfa",
       source_entity_id: "",
+      show_power_button: true,
+      show_refresh_button: true,
       power_on_action: null,
       power_off_action: null,
+      refresh_action: null,
       devices: [
         {
           id: "apple_tv",
@@ -44,6 +49,7 @@ const DEFAULT_CONFIG = {
           switch_action: null,
           power_on_action: null,
           power_off_action: null,
+          refresh_action: null,
           card_config: {
             type: "custom:universal-remote-card",
             remote_id: "remote.bedroom",
@@ -185,8 +191,11 @@ class WandRemoteCard extends HTMLElement {
       icon: room.icon || "mdi:sofa",
       accent: room.accent || "#38bdf8",
       source_entity_id: room.source_entity_id || "",
+      show_power_button: room.show_power_button ?? true,
+      show_refresh_button: room.show_refresh_button ?? true,
       power_on_action: room.power_on_action || null,
       power_off_action: room.power_off_action || null,
+      refresh_action: room.refresh_action || null,
       devices: (room.devices || []).map((device) => this._normalizeDevice(device, merged))
     }));
     return merged;
@@ -222,6 +231,7 @@ class WandRemoteCard extends HTMLElement {
       switch_action: device.switch_action || null,
       power_on_action: device.power_on_action || null,
       power_off_action: device.power_off_action || null,
+      refresh_action: device.refresh_action || null,
       hidden_when_off: Boolean(device.hidden_when_off),
       use_universal_remote_card: device.use_universal_remote_card ?? rootConfig.use_universal_remote_card,
       card_config: cardConfig,
@@ -358,12 +368,13 @@ class WandRemoteCard extends HTMLElement {
             </div>
             <div class="header-actions">
               ${this._config.show_entity_status ? `<span class="badge ${roomPower}">${this._escape(roomPower)}</span>` : ""}
-              ${this._config.show_power_bar ? `<button class="power-room ${roomPower}" data-room-power title="Room power"><ha-icon icon="mdi:power"></ha-icon></button>` : ""}
+              ${this._config.show_refresh_button && room.show_refresh_button !== false ? `<button class="refresh-room" data-room-refresh title="Refresh room entities"><ha-icon icon="mdi:refresh"></ha-icon></button>` : ""}
+              ${this._config.show_power_bar && room.show_power_button !== false ? `<button class="power-room ${roomPower}" data-room-power title="Room power"><ha-icon icon="mdi:power"></ha-icon></button>` : ""}
             </div>
           </header>
 
           <section class="device-strip">${this._visibleDevices(room).map((item) => this._deviceButton(item)).join("")}</section>
-          ${device ? this._deviceHeader(device) : `<div class="empty-message">Add a device for ${this._escape(room.name)} in the visual editor.</div>`}
+          ${device && this._config.show_now_controlling ? this._deviceHeader(device) : device ? "" : `<div class="empty-message">Add a device for ${this._escape(room.name)} in the visual editor.</div>`}
           <section id="remote-host" class="remote-host">${device ? this._fallbackRemote(device) : ""}</section>
         `}
       </ha-card>
@@ -398,6 +409,7 @@ class WandRemoteCard extends HTMLElement {
     });
 
     this.shadowRoot.querySelector("[data-room-power]")?.addEventListener("click", () => this._toggleRoomPower(room));
+    this.shadowRoot.querySelector("[data-room-refresh]")?.addEventListener("click", () => this._refreshRoom(room, device));
     this.shadowRoot.querySelector("[data-device-power]")?.addEventListener("click", () => this._toggleDevicePower(device));
     this.shadowRoot.querySelectorAll("[data-fallback-action]").forEach((button) => {
       button.addEventListener("click", () => this._callFallbackAction(device, button.dataset.fallbackAction));
@@ -596,6 +608,28 @@ class WandRemoteCard extends HTMLElement {
     await this._setDevicePower(device, this._isOn(device) ? "off" : "on");
   }
 
+  async _refreshRoom(room, device = this._currentDevice()) {
+    if (!room || !this._hass) return;
+    if (room.refresh_action) {
+      await this._runAction(room.refresh_action);
+      return;
+    }
+    if (device?.refresh_action) {
+      await this._runAction(device.refresh_action);
+      return;
+    }
+
+    const entities = [...new Set((room.devices || [])
+      .flatMap((item) => [item.remote_id, item.media_player_id, item.power_entity, item.source_entity_id, ...(item.availability_entities || [])])
+      .filter(Boolean))];
+    if (!entities.length) return;
+
+    await Promise.allSettled([
+      this._hass.callService("homeassistant", "update_entity", { entity_id: entities }),
+      ...entities.map((entityId) => this._hass.callService("homeassistant", "reload_config_entry", {}, { entity_id: entityId }))
+    ]);
+  }
+
   async _selectDevice(device, room) {
     if (!device) return;
     let switched = false;
@@ -726,7 +760,7 @@ class WandRemoteCard extends HTMLElement {
       }
       .badge { padding:7px 10px; border-radius:999px; border:1px solid ${theme.border}; background:${theme.panel}; color:${theme.muted}; font-size:11px; font-weight:800; text-transform:uppercase; }
       .badge.on, .badge.issue { color:${theme.text}; border-color:color-mix(in srgb, var(--accent) 45%, ${theme.border}); }
-      .power-room, .power-device {
+      .power-room, .power-device, .refresh-room {
         width:42px; height:42px; display:grid; place-items:center; border-radius:50%; background:${theme.panel}; border:1px solid ${theme.border};
         transition:transform .16s ease, background .16s ease, border-color .16s ease;
       }
@@ -754,8 +788,8 @@ class WandRemoteCard extends HTMLElement {
         background:${theme.panel}; border:1px solid ${theme.border}; backdrop-filter:blur(18px);
         transition:transform .18s ease, background .18s ease, border-color .18s ease, box-shadow .18s ease;
       }
-      .device:hover, .action:hover, .power-room:hover, .power-device:hover, .back:hover { background:${theme.panelStrong}; }
-      .device:active, .action:active, .power-room:active, .power-device:active { transform:scale(.96); }
+      .device:hover, .action:hover, .power-room:hover, .power-device:hover, .refresh-room:hover, .back:hover { background:${theme.panelStrong}; }
+      .device:active, .action:active, .power-room:active, .power-device:active, .refresh-room:active { transform:scale(.96); }
       .device.selected { border-color:color-mix(in srgb, var(--item-accent) 62%, transparent); box-shadow:0 0 0 3px color-mix(in srgb, var(--item-accent) 15%, transparent); background:linear-gradient(135deg, color-mix(in srgb, var(--item-accent) 22%, ${theme.panelStrong}), ${theme.panelStrong}); }
       .device.source-active { border-color:#22c55e; box-shadow:0 0 0 3px rgba(34,197,94,.14), 0 10px 24px rgba(34,197,94,.10); }
       .device ha-icon { color:var(--item-accent); --mdc-icon-size:26px; }
@@ -839,8 +873,10 @@ class WandRemoteCardEditor extends HTMLElement {
             <div class="toggles">
               ${this._toggle("use_universal_remote_card", "Embed universal-remote-card")}
               ${this._toggle("show_power_bar", "Show room power")}
+              ${this._toggle("show_refresh_button", "Show refresh")}
               ${this._toggle("show_entity_status", "Show status")}
               ${this._toggle("show_media_preview", "Show media preview")}
+              ${this._toggle("show_now_controlling", "Show now controlling")}
               ${this._toggle("show_unavailable_devices", "Show unavailable devices")}
               ${this._toggle("persist_navigation", "Remember selected area")}
             </div>
@@ -896,9 +932,15 @@ class WandRemoteCardEditor extends HTMLElement {
         </div>
         ${this._entityPicker("source_entity_id", "Source/status media player", room.source_entity_id, "media_player", "room")}
         <details>
-          <summary>Area power actions</summary>
+          <summary>Area header controls</summary>
+          <div class="toggles">
+            <label class="check"><input type="checkbox" data-room-check="show_power_button" ${room.show_power_button !== false ? "checked" : ""}> Show power button</label>
+            <label class="check"><input type="checkbox" data-room-check="show_refresh_button" ${room.show_refresh_button !== false ? "checked" : ""}> Show refresh button</label>
+          </div>
+          ${this._scriptPicker("room-refresh", "Refresh script", room.refresh_action)}
           ${this._actionEditor("room-power-on", "Power on script/service", room.power_on_action)}
           ${this._actionEditor("room-power-off", "Power off script/service", room.power_off_action)}
+          ${this._actionEditor("room-refresh", "Refresh/reload script/service", room.refresh_action)}
         </details>
       </section>
     `;
@@ -950,9 +992,11 @@ class WandRemoteCardEditor extends HTMLElement {
           <div><h3>Behavior</h3><p>Optional scripts for switching and power sequencing.</p></div>
         </div>
         ${this._scriptPicker("device-switch", "Source/input script", device.switch_action)}
+        ${this._scriptPicker("device-refresh", "Refresh script", device.refresh_action)}
         ${this._actionEditor("device-switch", "Run when selected", device.switch_action)}
         ${this._actionEditor("device-power-on", "Power on action", device.power_on_action)}
         ${this._actionEditor("device-power-off", "Power off action", device.power_off_action)}
+        ${this._actionEditor("device-refresh", "Refresh/reload action", device.refresh_action)}
         <label class="check"><input type="checkbox" data-device-check="hidden_when_off" ${device.hidden_when_off ? "checked" : ""}> Hide when unavailable filter is active</label>
         <label class="check"><input type="checkbox" data-device-check="use_universal_remote_card" ${device.use_universal_remote_card ?? this._config.use_universal_remote_card ? "checked" : ""}> Use universal-remote-card for this device</label>
         <label class="check"><input type="checkbox" data-device-check="auto_select_source" ${device.auto_select_source ? "checked" : ""}> Select source when tapped</label>
@@ -1100,6 +1144,10 @@ class WandRemoteCardEditor extends HTMLElement {
       this._render();
     });
     this.shadowRoot.querySelectorAll("[data-room]").forEach((input) => input.addEventListener("change", () => this._updateRoom(input)));
+    this.shadowRoot.querySelectorAll("[data-room-check]").forEach((input) => input.addEventListener("change", () => {
+      this._room()[input.dataset.roomCheck] = input.checked;
+      this._changed();
+    }));
     this.shadowRoot.querySelectorAll("[data-device]").forEach((input) => input.addEventListener("change", () => this._updateDevice(input)));
     this.shadowRoot.querySelectorAll("[data-entity-input]").forEach((input) => input.addEventListener("change", () => this._updateEntityInput(input)));
     this.shadowRoot.querySelectorAll("[data-device-check]").forEach((input) => input.addEventListener("change", () => {
@@ -1332,9 +1380,11 @@ class WandRemoteCardEditor extends HTMLElement {
     return {
       "room-power-on": { owner: "room", field: "power_on_action" },
       "room-power-off": { owner: "room", field: "power_off_action" },
+      "room-refresh": { owner: "room", field: "refresh_action" },
       "device-switch": { owner: "device", field: "switch_action" },
       "device-power-on": { owner: "device", field: "power_on_action" },
-      "device-power-off": { owner: "device", field: "power_off_action" }
+      "device-power-off": { owner: "device", field: "power_off_action" },
+      "device-refresh": { owner: "device", field: "refresh_action" }
     }[kind];
   }
 
@@ -1362,7 +1412,19 @@ class WandRemoteCardEditor extends HTMLElement {
 
   _addRoom() {
     this._config.rooms = this._config.rooms || [];
-    this._config.rooms.push({ id: "new_room", name: "New Room", icon: "mdi:sofa", accent: "#38bdf8", devices: [] });
+    this._config.rooms.push({
+      id: "new_room",
+      name: "New Room",
+      icon: "mdi:sofa",
+      accent: "#38bdf8",
+      source_entity_id: "",
+      show_power_button: true,
+      show_refresh_button: true,
+      power_on_action: null,
+      power_off_action: null,
+      refresh_action: null,
+      devices: []
+    });
     this._roomIndex = this._config.rooms.length - 1;
     this._deviceIndex = 0;
     this._changed(true);
@@ -1394,6 +1456,7 @@ class WandRemoteCardEditor extends HTMLElement {
       home_on_select: true,
       home_command: "auto",
       select_delay_ms: 900,
+      refresh_action: null,
       card_config: {
         type: this._config.universal_remote_card_type || "custom:universal-remote-card",
         custom_actions: [],
