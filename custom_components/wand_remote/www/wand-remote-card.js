@@ -1,4 +1,4 @@
-const VERSION = "0.9.1";
+const VERSION = "0.9.2";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -67,8 +67,11 @@ const DEFAULT_CONFIG = {
 const FALLBACK_ACTIONS = {
   back: { icon: "mdi:arrow-left", label: "Back", command: "back" },
   power: { icon: "mdi:power", label: "Power", command: "power" },
+  wakeup: { icon: "mdi:power-on", label: "Wake up", command: "wakeup" },
+  suspend: { icon: "mdi:power-sleep", label: "Suspend", command: "suspend" },
   home: { icon: "mdi:home", label: "Home", command: "home" },
   menu: { icon: "mdi:menu", label: "Menu", command: "menu" },
+  top_menu: { icon: "mdi:apple", label: "Top menu", command: "top_menu" },
   up: { icon: "mdi:chevron-up", label: "Up", command: "up" },
   down: { icon: "mdi:chevron-down", label: "Down", command: "down" },
   left: { icon: "mdi:chevron-left", label: "Left", command: "left" },
@@ -82,6 +85,8 @@ const FALLBACK_ACTIONS = {
   volume_up: { icon: "mdi:volume-plus", label: "Volume up", media: "volume_up" },
   volume_down: { icon: "mdi:volume-minus", label: "Volume down", media: "volume_down" },
   volume_mute: { icon: "mdi:volume-mute", label: "Mute", media: "volume_mute" },
+  mute: { icon: "mdi:volume-mute", label: "Mute", media: "volume_mute" },
+  slider: { icon: "mdi:tune-variant", label: "Volume slider", command: "slider" },
   channel_up: { icon: "mdi:chevron-double-up", label: "Channel up", command: "channel_up" },
   channel_down: { icon: "mdi:chevron-double-down", label: "Channel down", command: "channel_down" },
   n0: { text: "0", label: "0", command: "0" },
@@ -988,9 +993,9 @@ class WandRemoteCardEditor extends HTMLElement {
           ${this._rowsEditor(device)}
         </details>
         <details>
-          <summary>Use universal-remote-card editor</summary>
+          <summary>Advanced universal-remote-card editor</summary>
           <div class="nested-editor" data-universal-editor>
-            <div class="notice">If the installed universal-remote-card exposes its own editor, it appears here. Otherwise use the fields above.</div>
+            <div class="notice">Use Wand Remote buttons above for reliable layout editing and live preview. Supported changes from the embedded editor are synchronized when its editor exposes them.</div>
           </div>
         </details>
       </section>
@@ -1024,9 +1029,19 @@ class WandRemoteCardEditor extends HTMLElement {
 
   _rowsEditor(device) {
     const rows = this._cardRows(device);
-    const options = ["back", "power", "home", "menu", "touchpad", "volume_buttons", "rewind", "previous", "play_pause", "next", "fast_forward", "channel_up", "channel_down", "up", "down", "left", "right", "select", "n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8", "n9"];
+    const options = [
+      "back", "power", "wakeup", "suspend", "home", "menu", "top_menu",
+      "touchpad", "volume_buttons", "volume_up", "volume_down", "volume_mute", "mute", "slider",
+      "rewind", "previous", "play_pause", "next", "fast_forward",
+      "channel_up", "channel_down", "up", "down", "left", "right", "select",
+      "netflix", "youtube", "primevideo",
+      "n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8", "n9"
+    ];
     return `
       <div class="rows-builder" data-rows-builder>
+        <datalist id="wand-remote-action-options">
+          ${options.map((option) => `<option value="${this._escape(option)}"></option>`).join("")}
+        </datalist>
         <div class="section-head">
           <strong>Remote buttons</strong>
           <button data-add-remote-row>Add row</button>
@@ -1038,9 +1053,7 @@ class WandRemoteCardEditor extends HTMLElement {
               const key = Array.isArray(item) ? item[0] : item;
               return `
                 <label>
-                  <select data-remote-row-action="${rowIndex}:${actionIndex}">
-                    ${options.map((option) => `<option value="${option}" ${key === option ? "selected" : ""}>${this._escape(option.replaceAll("_", " "))}</option>`).join("")}
-                  </select>
+                  <input list="wand-remote-action-options" data-remote-row-action="${rowIndex}:${actionIndex}" value="${this._escape(key)}" placeholder="Choose or type a remote key">
                   <button data-remove-remote-action="${rowIndex}:${actionIndex}">Remove</button>
                 </label>
               `;
@@ -1244,6 +1257,7 @@ class WandRemoteCardEditor extends HTMLElement {
     ["input", "change", "focusout", "keyup"].forEach((eventName) => {
       editorElement.addEventListener(eventName, () => this._scheduleNestedEditorPull(editorElement));
     });
+    this._bridgeNestedShadowRoots(editorElement);
   }
 
   _commitNestedCardConfig(config) {
@@ -1260,6 +1274,7 @@ class WandRemoteCardEditor extends HTMLElement {
     if (config.custom_actions) device.custom_actions = clone(config.custom_actions);
     this._syncDeviceCardConfig();
     this._refreshRowsEditor();
+    this._emitPreviewSelection(false);
     if (this._nestedCommitQueued) return;
     this._nestedCommitQueued = true;
     const enqueue = window.queueMicrotask || ((callback) => Promise.resolve().then(callback));
@@ -1295,7 +1310,23 @@ class WandRemoteCardEditor extends HTMLElement {
     }, 0);
   }
 
-  _emitPreviewSelection() {
+  _bridgeNestedShadowRoots(editorElement, node = editorElement) {
+    const shadow = node?.shadowRoot;
+    if (!shadow) return;
+    this._nestedShadowRoots = this._nestedShadowRoots || new WeakSet();
+    if (!this._nestedShadowRoots.has(shadow)) {
+      this._nestedShadowRoots.add(shadow);
+      shadow.addEventListener("config-changed", () => this._scheduleNestedEditorPull(editorElement), true);
+      ["input", "change", "focusout", "keyup"].forEach((eventName) => {
+        shadow.addEventListener(eventName, () => this._scheduleNestedEditorPull(editorElement), true);
+      });
+      const observer = new MutationObserver(() => this._bridgeNestedShadowRoots(editorElement, node));
+      observer.observe(shadow, { childList: true, subtree: true });
+    }
+    shadow.querySelectorAll("*").forEach((child) => this._bridgeNestedShadowRoots(editorElement, child));
+  }
+
+  _emitPreviewSelection(notify = true) {
     const room = this._room();
     const device = room?.devices?.[this._deviceIndex];
     this._config.editor_preview_selection = {
@@ -1303,7 +1334,7 @@ class WandRemoteCardEditor extends HTMLElement {
       device_id: device?.id || "",
       nonce: Date.now()
     };
-    this._changed();
+    if (notify) this._changed();
   }
 
   _room() {
@@ -1358,6 +1389,7 @@ class WandRemoteCardEditor extends HTMLElement {
       rows
     };
     device.rows = rows;
+    this._emitPreviewSelection(false);
     this._changed();
     this._refreshRowsEditor();
     this._refreshNestedEditorConfig();
