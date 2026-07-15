@@ -1,4 +1,4 @@
-const VERSION = "0.10.1";
+const VERSION = "0.10.2";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -539,6 +539,16 @@ class WandRemoteCard extends HTMLElement {
     try {
       await operation();
       this._scheduleStateRefresh();
+      if (key === "refresh" && button?.isConnected) {
+        const icon = button.querySelector("ha-icon");
+        icon?.setAttribute("icon", "mdi:check");
+        button.classList.add("action-success");
+        window.setTimeout(() => {
+          if (!button.isConnected) return;
+          icon?.setAttribute("icon", "mdi:refresh");
+          button.classList.remove("action-success");
+        }, 1600);
+      }
     } catch (err) {
       console.warn(`Wand action failed (${key})`, err);
       this.dispatchEvent(new CustomEvent("hass-notification", {
@@ -915,6 +925,7 @@ class WandRemoteCard extends HTMLElement {
         transition:transform .16s ease, background .16s ease, border-color .16s ease;
       }
       .power-room.on, .power-device.on { background:color-mix(in srgb, var(--accent) 24%, ${theme.panelStrong}); border-color:color-mix(in srgb, var(--accent) 62%, ${theme.border}); }
+      .refresh-room.action-success { color:#22c55e; border-color:rgba(34,197,94,.55); background:rgba(34,197,94,.14); }
       .area-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:12px; }
       .area-card {
         position:relative; min-height:116px; padding:18px; border-radius:22px; display:flex; align-items:center; gap:16px; text-align:left;

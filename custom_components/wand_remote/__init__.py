@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -14,9 +13,7 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID, Platform
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import config_validation as cv, entity_registry as er
-from homeassistant.helpers.entity_component import async_update_entity
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
 from .const import CARD_FILENAME, CARD_URL, DOMAIN, STATIC_URL_PATH, VERSION
@@ -64,24 +61,56 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
 async def _async_register_lovelace_resource(hass: HomeAssistant, url: str) -> None:
     """Best-effort registration of the dashboard resource."""
     try:
-        from homeassistant.components.lovelace import resources
+        from homeassistant.components.lovelace import LOVELACE_DATA, resources
     except ImportError:
         return
 
     try:
-        existing = await resources.async_get_info(hass)
-        for item in existing.get("resources", []):
-            if str(item.get("url", "")).split("?")[0] == CARD_URL:
-                LOGGER.info("Wand Universal Remote Lovelace resource already exists")
+        lovelace_data = hass.data.get(LOVELACE_DATA)
+        resource_collection = getattr(lovelace_data, "resources", None)
+        if resource_collection is not None:
+            resource_items = resource_collection.async_items() or []
+        else:
+            existing = await resources.async_get_info(hass)
+            resource_items = existing.get("resources", [])
+
+        for item in resource_items:
+            current_url = str(item.get("url", ""))
+            if current_url.split("?")[0] != CARD_URL:
+                continue
+            if current_url == url:
+                LOGGER.info(
+                    "Wand Universal Remote Lovelace resource is current: %s", url
+                )
                 return
 
-        await resources.async_create_item(
-            hass,
-            {
-                "res_type": "module",
-                "url": url,
-            },
-        )
+            resource_id = item.get("id")
+            if resource_id:
+                data = {"res_type": "module", "url": url}
+                if resource_collection is not None:
+                    await resource_collection.async_update_item(resource_id, data)
+                else:
+                    await resources.async_update_item(hass, resource_id, data)
+                LOGGER.info(
+                    "Wand Universal Remote Lovelace resource updated from %s to %s",
+                    current_url,
+                    url,
+                )
+                return
+
+            LOGGER.warning(
+                "Could not update the existing Wand resource URL from %s to %s. "
+                "Update it manually in Settings > Dashboards > Resources.",
+                current_url,
+                url,
+            )
+            return
+
+        data = {"res_type": "module", "url": url}
+        if resource_collection is not None:
+            await resource_collection.async_create_item(data)
+        else:
+            await resources.async_create_item(hass, data)
         LOGGER.info("Wand Universal Remote Lovelace resource registered: %s", url)
     except Exception as err:
         # Resource APIs can vary between HA versions and storage modes. The card is
@@ -135,42 +164,23 @@ def _async_register_services(hass: HomeAssistant) -> None:
                     if user.permissions.check_entity(entity_id, POLICY_CONTROL)
                 ]
 
-            registry = er.async_get(hass)
-            entry_ids: set[str] = set()
-            update_ids: list[str] = []
-            for entity_id in entity_ids:
-                entity_entry = registry.async_get(entity_id)
-                config_entry_id = entity_entry.config_entry_id if entity_entry else None
-                if config_entry_id:
-                    entry_ids.add(config_entry_id)
-                else:
-                    update_ids.append(entity_id)
+            if not entity_ids:
+                return
 
-            refreshing: set[str] = hass.data.setdefault(DOMAIN, {}).setdefault(
-                "refreshing_entries", set()
+            LOGGER.info(
+                "Wand is reloading config entries for: %s", ", ".join(entity_ids)
             )
-            entry_ids.difference_update(refreshing)
-            refreshing.update(entry_ids)
-            try:
-                reload_ids = sorted(entry_ids)
-                results = await asyncio.gather(
-                    *(hass.config_entries.async_reload(entry_id) for entry_id in reload_ids),
-                    *(async_update_entity(hass, entity_id) for entity_id in update_ids),
-                    return_exceptions=True,
-                )
-                failures = [
-                    result
-                    for index, result in enumerate(results)
-                    if isinstance(result, Exception)
-                    or (index < len(reload_ids) and result is False)
-                ]
-                if failures:
-                    LOGGER.warning("Wand remote refresh had %s failure(s)", len(failures))
-                    raise HomeAssistantError(
-                        "One or more remote integrations could not be reloaded"
-                    )
-            finally:
-                refreshing.difference_update(entry_ids)
+            # Call the same core service as the original working frontend action.
+            # Omitting the outer user's context is safe here because entity access
+            # was checked above and prevents the admin-only wrapper from rejecting
+            # an otherwise authorized normal user.
+            await hass.services.async_call(
+                "homeassistant",
+                "reload_config_entry",
+                {},
+                target={ATTR_ENTITY_ID: entity_ids},
+                blocking=True,
+            )
 
         hass.services.async_register(
             DOMAIN,
