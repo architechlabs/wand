@@ -14,7 +14,8 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID, Platform
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.helpers import config_validation as cv
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv, entity_registry as er
 from homeassistant.helpers.entity_component import async_update_entity
 from homeassistant.helpers.typing import ConfigType
 
@@ -122,7 +123,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
     if not hass.services.has_service(DOMAIN, "refresh_entities"):
 
         async def _async_refresh_entities(call: ServiceCall) -> None:
-            """Refresh only entities the calling user is allowed to control."""
+            """Reload integrations backing entities the user may control."""
             entity_ids: list[str] = list(dict.fromkeys(call.data[ATTR_ENTITY_ID]))
             if call.context.user_id:
                 user = await hass.auth.async_get_user(call.context.user_id)
@@ -134,10 +135,42 @@ def _async_register_services(hass: HomeAssistant) -> None:
                     if user.permissions.check_entity(entity_id, POLICY_CONTROL)
                 ]
 
-            await asyncio.gather(
-                *(async_update_entity(hass, entity_id) for entity_id in entity_ids),
-                return_exceptions=True,
+            registry = er.async_get(hass)
+            entry_ids: set[str] = set()
+            update_ids: list[str] = []
+            for entity_id in entity_ids:
+                entity_entry = registry.async_get(entity_id)
+                config_entry_id = entity_entry.config_entry_id if entity_entry else None
+                if config_entry_id:
+                    entry_ids.add(config_entry_id)
+                else:
+                    update_ids.append(entity_id)
+
+            refreshing: set[str] = hass.data.setdefault(DOMAIN, {}).setdefault(
+                "refreshing_entries", set()
             )
+            entry_ids.difference_update(refreshing)
+            refreshing.update(entry_ids)
+            try:
+                reload_ids = sorted(entry_ids)
+                results = await asyncio.gather(
+                    *(hass.config_entries.async_reload(entry_id) for entry_id in reload_ids),
+                    *(async_update_entity(hass, entity_id) for entity_id in update_ids),
+                    return_exceptions=True,
+                )
+                failures = [
+                    result
+                    for index, result in enumerate(results)
+                    if isinstance(result, Exception)
+                    or (index < len(reload_ids) and result is False)
+                ]
+                if failures:
+                    LOGGER.warning("Wand remote refresh had %s failure(s)", len(failures))
+                    raise HomeAssistantError(
+                        "One or more remote integrations could not be reloaded"
+                    )
+            finally:
+                refreshing.difference_update(entry_ids)
 
         hass.services.async_register(
             DOMAIN,

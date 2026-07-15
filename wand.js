@@ -1,4 +1,4 @@
-const VERSION = "0.10.0";
+const VERSION = "0.10.1";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -542,7 +542,7 @@ class WandRemoteCard extends HTMLElement {
     } catch (err) {
       console.warn(`Wand action failed (${key})`, err);
       this.dispatchEvent(new CustomEvent("hass-notification", {
-        detail: { message: "Wand could not complete that action. Check this user's entity permissions and try again." },
+        detail: { message: "Wand could not complete that action. Check the Home Assistant logs and try again." },
         bubbles: true,
         composed: true
       }));
@@ -766,11 +766,18 @@ class WandRemoteCard extends HTMLElement {
     // core fallback for users who install the card as a frontend-only HACS resource.
     if (this._hass.services?.wand_remote?.refresh_entities) {
       await this._hass.callService("wand_remote", "refresh_entities", { entity_id: entities });
+    } else if (this._hass.user?.is_admin) {
+      await this._hass.callService("homeassistant", "reload_config_entry", {}, { entity_id: entities });
     } else {
       await this._hass.callService("homeassistant", "update_entity", { entity_id: entities });
     }
     if (this._embeddedCard) this._embeddedCard.hass = this._hass;
     this._refreshDynamicState();
+    this.dispatchEvent(new CustomEvent("hass-notification", {
+      detail: { message: "Remote integrations refreshed." },
+      bubbles: true,
+      composed: true
+    }));
   }
 
   async _selectDevice(device, room) {
