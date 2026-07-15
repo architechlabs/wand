@@ -1,4 +1,4 @@
-const VERSION = "0.10.2";
+const VERSION = "0.10.3";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -779,7 +779,7 @@ class WandRemoteCard extends HTMLElement {
     } else if (this._hass.user?.is_admin) {
       await this._hass.callService("homeassistant", "reload_config_entry", {}, { entity_id: entities });
     } else {
-      await this._hass.callService("homeassistant", "update_entity", { entity_id: entities });
+      throw new Error("Wand backend refresh service is unavailable");
     }
     if (this._embeddedCard) this._embeddedCard.hass = this._hass;
     this._refreshDynamicState();

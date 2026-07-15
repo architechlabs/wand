@@ -8,11 +8,12 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.auth.permissions.const import POLICY_CONTROL
+from homeassistant.auth.permissions.const import POLICY_READ
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID, Platform
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import Context, HomeAssistant, ServiceCall
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
@@ -152,34 +153,36 @@ def _async_register_services(hass: HomeAssistant) -> None:
     if not hass.services.has_service(DOMAIN, "refresh_entities"):
 
         async def _async_refresh_entities(call: ServiceCall) -> None:
-            """Reload integrations backing entities the user may control."""
+            """Reload integrations backing entities visible to the user."""
             entity_ids: list[str] = list(dict.fromkeys(call.data[ATTR_ENTITY_ID]))
             if call.context.user_id:
                 user = await hass.auth.async_get_user(call.context.user_id)
                 if user is None:
-                    return
+                    raise HomeAssistantError("Wand could not identify the current user")
                 entity_ids = [
                     entity_id
                     for entity_id in entity_ids
-                    if user.permissions.check_entity(entity_id, POLICY_CONTROL)
+                    if user.permissions.check_entity(entity_id, POLICY_READ)
                 ]
 
             if not entity_ids:
-                return
+                raise HomeAssistantError(
+                    "This user cannot access any entities configured for this remote"
+                )
 
             LOGGER.info(
                 "Wand is reloading config entries for: %s", ", ".join(entity_ids)
             )
             # Call the same core service as the original working frontend action.
-            # Omitting the outer user's context is safe here because entity access
-            # was checked above and prevents the admin-only wrapper from rejecting
-            # an otherwise authorized normal user.
+            # A fresh system context is safe because entity access was checked above
+            # and prevents the admin-only wrapper from rejecting a normal user.
             await hass.services.async_call(
                 "homeassistant",
                 "reload_config_entry",
                 {},
                 target={ATTR_ENTITY_ID: entity_ids},
                 blocking=True,
+                context=Context(),
             )
 
         hass.services.async_register(
