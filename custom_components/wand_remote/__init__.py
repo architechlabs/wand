@@ -21,6 +21,7 @@ from .const import CARD_FILENAME, CARD_URL, DOMAIN, STATIC_URL_PATH, VERSION
 
 PLATFORMS: list[Platform] = []
 LOGGER = logging.getLogger(__name__)
+ATTR_REFRESH_ENTITIES = "entities"
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -154,7 +155,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
         async def _async_refresh_entities(call: ServiceCall) -> None:
             """Reload integrations backing entities visible to the user."""
-            entity_ids: list[str] = list(dict.fromkeys(call.data[ATTR_ENTITY_ID]))
+            entity_ids: list[str] = list(
+                dict.fromkeys(call.data[ATTR_REFRESH_ENTITIES])
+            )
             if call.context.user_id:
                 user = await hass.auth.async_get_user(call.context.user_id)
                 if user is None:
@@ -189,7 +192,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             DOMAIN,
             "refresh_entities",
             _async_refresh_entities,
-            schema=vol.Schema({vol.Required(ATTR_ENTITY_ID): cv.entity_ids}),
+            schema=vol.Schema({vol.Required(ATTR_REFRESH_ENTITIES): cv.entity_ids}),
         )
 
     if hass.services.has_service(DOMAIN, "reload_frontend"):

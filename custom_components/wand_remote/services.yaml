@@ -29,9 +29,9 @@ reload_frontend:
 
 refresh_entities:
   name: Refresh remote integrations
-  description: Reloads integrations backing remote entities the calling user has permission to control.
+  description: Reloads integrations backing remote entities visible to the calling user.
   fields:
-    entity_id:
+    entities:
       name: Entities
       required: true
       selector:

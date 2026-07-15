@@ -1,4 +1,4 @@
-const VERSION = "0.10.3";
+const VERSION = "0.10.4";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -551,8 +551,9 @@ class WandRemoteCard extends HTMLElement {
       }
     } catch (err) {
       console.warn(`Wand action failed (${key})`, err);
+      const reason = String(err?.message || err?.body?.message || "Unknown Home Assistant error").slice(0, 180);
       this.dispatchEvent(new CustomEvent("hass-notification", {
-        detail: { message: "Wand could not complete that action. Check the Home Assistant logs and try again." },
+        detail: { message: key === "refresh" ? `Remote refresh failed: ${reason}` : `Wand action failed: ${reason}` },
         bubbles: true,
         composed: true
       }));
@@ -775,7 +776,9 @@ class WandRemoteCard extends HTMLElement {
     // The integration service filters by the caller's entity permissions. Keep the
     // core fallback for users who install the card as a frontend-only HACS resource.
     if (this._hass.services?.wand_remote?.refresh_entities) {
-      await this._hass.callService("wand_remote", "refresh_entities", { entity_id: entities });
+      // Avoid the reserved entity_id field: Home Assistant authorizes target
+      // fields before the Wand handler can apply its scoped read check.
+      await this._hass.callService("wand_remote", "refresh_entities", { entities });
     } else if (this._hass.user?.is_admin) {
       await this._hass.callService("homeassistant", "reload_config_entry", {}, { entity_id: entities });
     } else {
