@@ -1,4 +1,4 @@
-const VERSION = "0.10.4";
+const VERSION = "0.10.5";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -773,16 +773,15 @@ class WandRemoteCard extends HTMLElement {
       .filter(Boolean))];
     if (!entities.length) return;
 
-    // The integration service filters by the caller's entity permissions. Keep the
-    // core fallback for users who install the card as a frontend-only HACS resource.
-    if (this._hass.services?.wand_remote?.refresh_entities) {
-      // Avoid the reserved entity_id field: Home Assistant authorizes target
-      // fields before the Wand handler can apply its scoped read check.
+    // Service metadata can be hidden from normal users even while the service is
+    // callable, so invoke the permission-scoped Wand backend directly.
+    try {
       await this._hass.callService("wand_remote", "refresh_entities", { entities });
-    } else if (this._hass.user?.is_admin) {
+    } catch (err) {
+      const reason = String(err?.message || err?.body?.message || "");
+      const serviceMissing = /service.*(not found|does not exist)|unknown service/i.test(reason);
+      if (!this._hass.user?.is_admin || !serviceMissing) throw err;
       await this._hass.callService("homeassistant", "reload_config_entry", {}, { entity_id: entities });
-    } else {
-      throw new Error("Wand backend refresh service is unavailable");
     }
     if (this._embeddedCard) this._embeddedCard.hass = this._hass;
     this._refreshDynamicState();
