@@ -26,3 +26,14 @@ call_action:
 reload_frontend:
   name: Reload frontend
   description: Re-registers the Wand Universal Remote static path and Lovelace resource.
+
+refresh_entities:
+  name: Refresh remote entities
+  description: Refreshes remote entities the calling user has permission to control.
+  fields:
+    entity_id:
+      name: Entities
+      required: true
+      selector:
+        entity:
+          multiple: true

@@ -38,14 +38,14 @@ If the card does not appear in the picker, add the frontend resource manually:
 
 ```text
 Settings -> Dashboards -> three dots -> Resources -> Add Resource
-URL: /wand_remote/wand-remote-card.js?v=0.9.3
+URL: /wand_remote/wand-remote-card.js?v=0.10.0
 Resource type: JavaScript module
 ```
 
 Then hard refresh the browser and reopen the card picker. You can also test whether the file is being served by opening:
 
 ```text
-http://YOUR_HA_ADDRESS:8123/wand_remote/wand-remote-card.js?v=0.9.3
+http://YOUR_HA_ADDRESS:8123/wand_remote/wand-remote-card.js?v=0.10.0
 ```
 
 If that URL returns 404, the integration has not been added in **Devices & services** or Home Assistant has not restarted after installation.

@@ -1,4 +1,4 @@
-const VERSION = "0.9.3";
+const VERSION = "0.10.0";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -158,6 +158,23 @@ class WandRemoteCard extends HTMLElement {
     this._embeddedCard = null;
     this._embeddedSignature = "";
     this._restoredSelection = false;
+    this._hasRendered = false;
+    this._stateFrame = 0;
+    this._focusMode = false;
+    this._actionLocks = new Set();
+    this._renderToken = 0;
+    this._onKeyDown = (event) => {
+      if (event.key === "Escape" && this._focusMode) this._toggleFocusMode(false);
+    };
+  }
+
+  connectedCallback() {
+    window.addEventListener("keydown", this._onKeyDown);
+  }
+
+  disconnectedCallback() {
+    window.removeEventListener("keydown", this._onKeyDown);
+    if (this._stateFrame) cancelAnimationFrame(this._stateFrame);
   }
 
   static getStubConfig() {
@@ -187,7 +204,8 @@ class WandRemoteCard extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     if (this._embeddedCard) this._embeddedCard.hass = hass;
-    this._render();
+    if (!this._hasRendered) this._render();
+    else this._scheduleStateRefresh();
   }
 
   getCardSize() {
@@ -358,6 +376,7 @@ class WandRemoteCard extends HTMLElement {
 
   _render() {
     if (!this.shadowRoot) return;
+    const renderToken = ++this._renderToken;
     const room = this._currentRoom();
     const device = this._currentDevice();
     const theme = THEMES[this._config.theme] || THEMES.midnight;
@@ -368,7 +387,7 @@ class WandRemoteCard extends HTMLElement {
 
     this.shadowRoot.innerHTML = `
       <style>${this._styles(theme, accent)}</style>
-      <ha-card class="wrap ${isLanding ? "landing-wrap" : "control-wrap"}">
+      <ha-card class="wrap ${isLanding ? "landing-wrap" : "control-wrap"}${!isLanding && this._focusMode ? " focus-mode" : ""}">
         ${isLanding ? this._landingPage() : `
           <header class="control-header">
             <button class="back" data-back title="Areas"><ha-icon icon="mdi:chevron-left"></ha-icon></button>
@@ -379,7 +398,8 @@ class WandRemoteCard extends HTMLElement {
             </div>
             <div class="header-actions">
               ${this._config.show_entity_status ? `<span class="badge ${roomPower}">${this._escape(roomPower)}</span>` : ""}
-              ${this._config.show_refresh_button && room.show_refresh_button !== false ? `<button class="refresh-room" data-room-refresh title="Refresh room entities"><ha-icon icon="mdi:refresh"></ha-icon></button>` : ""}
+              <button class="focus-remote" data-focus-remote title="${this._focusMode ? "Exit expanded remote" : "Expand remote"}" aria-label="${this._focusMode ? "Exit expanded remote" : "Expand remote"}"><ha-icon icon="mdi:${this._focusMode ? "arrow-collapse" : "arrow-expand"}"></ha-icon></button>
+              ${this._config.show_refresh_button && room.show_refresh_button !== false ? `<button class="refresh-room" data-room-refresh title="Refresh entity states" aria-label="Refresh entity states"><ha-icon icon="mdi:refresh"></ha-icon></button>` : ""}
               ${this._config.show_power_bar && room.show_power_button !== false ? `<button class="power-room ${roomPower}" data-room-power title="Room power"><ha-icon icon="mdi:power"></ha-icon></button>` : ""}
             </div>
           </header>
@@ -405,28 +425,134 @@ class WandRemoteCard extends HTMLElement {
       this._selectedRoom = null;
       this._selectedDevice = null;
       this._embeddedCard = null;
+      this._focusMode = false;
       this._rememberSelection();
       this._render();
     });
 
     this.shadowRoot.querySelectorAll("[data-device]").forEach((button) => {
-      button.addEventListener("click", async () => {
+      button.addEventListener("click", () => {
         this._selectedDevice = button.dataset.device;
         this._embeddedCard = null;
         this._rememberSelection();
-        await this._selectDevice(this._currentDevice(), room);
+        const selectedDevice = this._currentDevice();
         this._render();
+        this._runUiAction(`select:${selectedDevice?.id}`, () => this._selectDevice(selectedDevice, room));
       });
     });
 
-    this.shadowRoot.querySelector("[data-room-power]")?.addEventListener("click", () => this._toggleRoomPower(room));
-    this.shadowRoot.querySelector("[data-room-refresh]")?.addEventListener("click", () => this._refreshRoom(room, device));
-    this.shadowRoot.querySelector("[data-device-power]")?.addEventListener("click", () => this._toggleDevicePower(device));
+    this.shadowRoot.querySelector("[data-focus-remote]")?.addEventListener("click", () => this._toggleFocusMode());
+    this.shadowRoot.querySelector("[data-room-power]")?.addEventListener("click", (event) => this._runUiAction("room-power", () => this._toggleRoomPower(room), event.currentTarget));
+    this.shadowRoot.querySelector("[data-room-refresh]")?.addEventListener("click", (event) => this._runUiAction("refresh", () => this._refreshRoom(room, device), event.currentTarget));
+    this.shadowRoot.querySelector("[data-device-power]")?.addEventListener("click", (event) => this._runUiAction(`device-power:${device?.id}`, () => this._toggleDevicePower(device), event.currentTarget));
     this.shadowRoot.querySelectorAll("[data-fallback-action]").forEach((button) => {
-      button.addEventListener("click", () => this._callFallbackAction(device, button.dataset.fallbackAction));
+      button.addEventListener("click", () => this._runUiAction(`action:${device?.id}:${button.dataset.fallbackAction}`, () => this._callFallbackAction(device, button.dataset.fallbackAction), button));
     });
 
-    if (!isLanding) this._renderEmbeddedRemote(device);
+    this._hasRendered = true;
+    if (!isLanding) this._renderEmbeddedRemote(device, renderToken);
+  }
+
+  _scheduleStateRefresh() {
+    if (this._stateFrame) return;
+    this._stateFrame = requestAnimationFrame(() => {
+      this._stateFrame = 0;
+      this._refreshDynamicState();
+    });
+  }
+
+  _refreshDynamicState() {
+    const room = this._currentRoom();
+    if (!room) {
+      this.shadowRoot.querySelectorAll("[data-room]").forEach((button) => {
+        const item = this._config.rooms.find((candidate) => candidate.id === button.dataset.room);
+        if (!item) return;
+        const active = (item.devices || []).filter((device) => this._isOn(device)).length;
+        const count = item.devices?.length || 0;
+        const status = button.querySelector("i");
+        const summary = button.querySelector("small");
+        if (status) status.className = this._roomPowerState(item);
+        if (summary) summary.textContent = `${count} device${count === 1 ? "" : "s"} \u00b7 ${active} active`;
+      });
+      return;
+    }
+
+    const roomPower = this._roomPowerState(room);
+    const visibleIds = this._visibleDevices(room).map((item) => item.id).join("\n");
+    const renderedIds = [...this.shadowRoot.querySelectorAll("[data-device]")]
+      .map((button) => button.dataset.device)
+      .join("\n");
+    if (visibleIds !== renderedIds) {
+      this._render();
+      return;
+    }
+
+    const badge = this.shadowRoot.querySelector(".badge");
+    if (badge) {
+      badge.className = `badge ${roomPower}`;
+      badge.textContent = roomPower;
+    }
+    const roomPowerButton = this.shadowRoot.querySelector("[data-room-power]");
+    if (roomPowerButton) roomPowerButton.className = `power-room ${roomPower}`;
+    const source = this._currentSource(room);
+    const sourceLine = this.shadowRoot.querySelector(".source-line");
+    if (Boolean(source) !== Boolean(sourceLine)) {
+      this._render();
+      return;
+    }
+    if (sourceLine) sourceLine.textContent = `Source: ${source}`;
+
+    this.shadowRoot.querySelectorAll("[data-device]").forEach((button) => {
+      const item = room.devices.find((candidate) => candidate.id === button.dataset.device);
+      if (!item) return;
+      button.classList.toggle("selected", item.id === this._currentDevice()?.id);
+      button.classList.toggle("source-active", this._sourceMatches(item, room));
+      const status = button.querySelector("i");
+      if (status) status.className = this._isUnavailable(item) ? "issue" : this._isOn(item) ? "on" : "off";
+    });
+
+    const device = this._currentDevice();
+    const devicePower = this.shadowRoot.querySelector("[data-device-power]");
+    if (devicePower) devicePower.className = `power-device ${this._isUnavailable(device) ? "unavailable" : this._isOn(device) ? "on" : "off"}`;
+  }
+
+  _toggleFocusMode(force) {
+    this._focusMode = typeof force === "boolean" ? force : !this._focusMode;
+    const wrap = this.shadowRoot?.querySelector(".wrap");
+    const button = this.shadowRoot?.querySelector("[data-focus-remote]");
+    wrap?.classList.toggle("focus-mode", this._focusMode);
+    if (button) {
+      const label = this._focusMode ? "Exit expanded remote" : "Expand remote";
+      button.title = label;
+      button.setAttribute("aria-label", label);
+      button.querySelector("ha-icon")?.setAttribute("icon", `mdi:${this._focusMode ? "arrow-collapse" : "arrow-expand"}`);
+    }
+  }
+
+  async _runUiAction(key, operation, button) {
+    if (this._actionLocks.has(key)) return;
+    this._actionLocks.add(key);
+    if (button) {
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+    }
+    try {
+      await operation();
+      this._scheduleStateRefresh();
+    } catch (err) {
+      console.warn(`Wand action failed (${key})`, err);
+      this.dispatchEvent(new CustomEvent("hass-notification", {
+        detail: { message: "Wand could not complete that action. Check this user's entity permissions and try again." },
+        bubbles: true,
+        composed: true
+      }));
+    } finally {
+      this._actionLocks.delete(key);
+      if (button?.isConnected) {
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+      }
+    }
   }
 
   _landingPage() {
@@ -541,7 +667,7 @@ class WandRemoteCard extends HTMLElement {
     `;
   }
 
-  async _renderEmbeddedRemote(device) {
+  async _renderEmbeddedRemote(device, renderToken = this._renderToken) {
     const host = this.shadowRoot?.getElementById("remote-host");
     if (!host || !device || !device.use_universal_remote_card) return;
 
@@ -555,6 +681,7 @@ class WandRemoteCard extends HTMLElement {
 
     try {
       this._helpers = this._helpers || await window.loadCardHelpers();
+      if (renderToken !== this._renderToken || !host.isConnected) return;
       const card = this._helpers.createCardElement(cardConfig);
       card.hass = this._hass;
       this._embeddedCard = card;
@@ -596,7 +723,7 @@ class WandRemoteCard extends HTMLElement {
   }
 
   _fallbackButton(actionKey) {
-    if (actionKey === "touchpad") return `<button class="wide" data-fallback-action="select">Touchpad</button>`;
+    if (actionKey === "touchpad") return `<button class="wide touchpad" data-fallback-action="select"><ha-icon icon="mdi:gesture-tap"></ha-icon><span>Tap to select</span></button>`;
     if (actionKey === "volume_buttons") return "";
     const action = FALLBACK_ACTIONS[actionKey] || { icon: "mdi:gesture-tap-button", label: actionKey, command: actionKey };
     const body = action.text ? `<span>${this._escape(action.text)}</span>` : `<ha-icon icon="${this._escape(action.icon)}"></ha-icon>`;
@@ -635,10 +762,15 @@ class WandRemoteCard extends HTMLElement {
       .filter(Boolean))];
     if (!entities.length) return;
 
-    await Promise.allSettled([
-      this._hass.callService("homeassistant", "update_entity", { entity_id: entities }),
-      ...entities.map((entityId) => this._hass.callService("homeassistant", "reload_config_entry", {}, { entity_id: entityId }))
-    ]);
+    // The integration service filters by the caller's entity permissions. Keep the
+    // core fallback for users who install the card as a frontend-only HACS resource.
+    if (this._hass.services?.wand_remote?.refresh_entities) {
+      await this._hass.callService("wand_remote", "refresh_entities", { entity_id: entities });
+    } else {
+      await this._hass.callService("homeassistant", "update_entity", { entity_id: entities });
+    }
+    if (this._embeddedCard) this._embeddedCard.hass = this._hass;
+    this._refreshDynamicState();
   }
 
   async _selectDevice(device, room) {
@@ -748,7 +880,7 @@ class WandRemoteCard extends HTMLElement {
       :host { display:block; --accent:${accent}; }
       * { box-sizing:border-box; letter-spacing:0; }
       .wrap {
-        overflow:hidden; padding:20px; border-radius:24px; color:${theme.text};
+        overflow:hidden; padding:18px; border-radius:24px; color:${theme.text}; contain:layout paint;
         background:linear-gradient(160deg, ${theme.surface}, ${theme.surface}), radial-gradient(circle at 50% -10%, color-mix(in srgb, var(--accent) 26%, transparent), transparent 44%);
         border:1px solid ${theme.border}; box-shadow:0 22px 62px ${theme.shadow};
       }
@@ -771,7 +903,7 @@ class WandRemoteCard extends HTMLElement {
       }
       .badge { padding:7px 10px; border-radius:999px; border:1px solid ${theme.border}; background:${theme.panel}; color:${theme.muted}; font-size:11px; font-weight:800; text-transform:uppercase; }
       .badge.on, .badge.issue { color:${theme.text}; border-color:color-mix(in srgb, var(--accent) 45%, ${theme.border}); }
-      .power-room, .power-device, .refresh-room {
+      .power-room, .power-device, .refresh-room, .focus-remote {
         width:42px; height:42px; display:grid; place-items:center; border-radius:50%; background:${theme.panel}; border:1px solid ${theme.border};
         transition:transform .16s ease, background .16s ease, border-color .16s ease;
       }
@@ -799,8 +931,10 @@ class WandRemoteCard extends HTMLElement {
         background:${theme.panel}; border:1px solid ${theme.border}; backdrop-filter:blur(18px);
         transition:transform .18s ease, background .18s ease, border-color .18s ease, box-shadow .18s ease;
       }
-      .device:hover, .action:hover, .power-room:hover, .power-device:hover, .refresh-room:hover, .back:hover { background:${theme.panelStrong}; }
-      .device:active, .action:active, .power-room:active, .power-device:active, .refresh-room:active { transform:scale(.96); }
+      .device:hover, .action:hover, .power-room:hover, .power-device:hover, .refresh-room:hover, .focus-remote:hover, .back:hover { background:${theme.panelStrong}; }
+      .device:active, .action:active, .power-room:active, .power-device:active, .refresh-room:active, .focus-remote:active { transform:scale(.96); }
+      button[aria-busy="true"] ha-icon { animation:wand-spin .75s linear infinite; }
+      button:disabled { cursor:wait; opacity:.72; }
       .device.selected { border-color:color-mix(in srgb, var(--item-accent) 62%, transparent); box-shadow:0 0 0 3px color-mix(in srgb, var(--item-accent) 15%, transparent); background:linear-gradient(135deg, color-mix(in srgb, var(--item-accent) 22%, ${theme.panelStrong}), ${theme.panelStrong}); }
       .device.source-active { border-color:#22c55e; box-shadow:0 0 0 3px rgba(34,197,94,.14), 0 10px 24px rgba(34,197,94,.10); }
       .device ha-icon { color:var(--item-accent); --mdc-icon-size:26px; }
@@ -819,22 +953,39 @@ class WandRemoteCard extends HTMLElement {
       .control-chips { display:flex; gap:8px; flex-wrap:wrap; margin-top:9px; }
       .control-chips span { max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:5px 8px; border-radius:999px; background:${theme.panel}; border:1px solid ${theme.border}; color:${theme.muted}; font-size:11px; font-weight:800; }
       .control-chips .active { color:#22c55e; border-color:rgba(34,197,94,.42); background:rgba(34,197,94,.10); }
-      .remote-host { border-radius:22px; overflow:hidden; }
+      .remote-host { width:100%; min-height:320px; border-radius:22px; overflow:hidden; isolation:isolate; }
+      .remote-host > * { display:block; width:100%; }
       .remote-host.embedded { background:transparent; }
       .remote-host[data-error]::before { content:attr(data-error); display:block; margin-bottom:10px; color:${theme.muted}; font-size:12px; text-align:center; }
       .manual-remote { display:grid; gap:12px; padding:16px; border-radius:22px; border:1px solid color-mix(in srgb, var(--accent) 30%, ${theme.border}); background:${theme.panel}; }
       .row { display:flex; justify-content:center; gap:10px; flex-wrap:wrap; }
       .action, .wide { min-width:52px; height:52px; border-radius:16px; display:grid; place-items:center; background:${theme.panel}; border:1px solid ${theme.border}; }
       .wide { padding:0 16px; }
+      .touchpad { width:min(100%, 420px); height:150px; display:flex; flex-direction:column; gap:10px; border-radius:24px; font-weight:750; }
+      .touchpad ha-icon { --mdc-icon-size:32px; }
       .fallback-note { color:${theme.muted}; font-size:12px; text-align:center; margin:6px 0 12px; }
       .empty-message { padding:28px; text-align:center; color:${theme.muted}; border:1px dashed ${theme.border}; border-radius:18px; }
+      .focus-mode { position:fixed; inset:12px; z-index:999; overflow:auto; border-radius:26px; }
+      .focus-mode .device-strip { grid-template-columns:repeat(auto-fit, minmax(110px, 1fr)); }
+      .focus-mode .remote-host { max-width:900px; min-height:520px; margin:0 auto; }
+      @keyframes wand-spin { to { transform:rotate(360deg); } }
       @media (max-width: 520px) {
-        .wrap { padding:16px; border-radius:20px; }
+        .wrap { padding:10px; border-radius:20px; }
         .control-header { grid-template-columns:auto 1fr; }
         .header-actions { grid-column:1 / -1; justify-content:flex-end; }
         h2 { font-size:21px; }
         .area-grid { grid-template-columns:1fr; }
-        .device-strip { grid-template-columns:repeat(auto-fit, minmax(74px, 1fr)); }
+        .device-strip { display:flex; gap:8px; overflow-x:auto; scrollbar-width:none; scroll-snap-type:x proximity; padding:2px; }
+        .device-strip::-webkit-scrollbar { display:none; }
+        .device { min-width:88px; min-height:66px; scroll-snap-align:start; }
+        .device-header { padding:10px; margin-bottom:8px; }
+        .control-chips { display:none; }
+        .remote-host { min-height:390px; border-radius:18px; }
+        .focus-mode { inset:0; border-radius:0; padding:8px; }
+        .focus-mode .remote-host { min-height:calc(100dvh - 180px); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { scroll-behavior:auto !important; transition:none !important; animation-duration:.01ms !important; }
       }
     `;
   }
@@ -851,6 +1002,7 @@ class WandRemoteCardEditor extends HTMLElement {
     this._config = clone(DEFAULT_CONFIG);
     this._roomIndex = 0;
     this._deviceIndex = 0;
+    this._entityListSignature = "";
   }
 
   setConfig(config) {
@@ -1199,9 +1351,16 @@ class WandRemoteCardEditor extends HTMLElement {
 
   _refreshEntityLists() {
     if (!this._hass || !this.shadowRoot) return;
+    const entityIds = Object.keys(this._hass.states || {}).sort();
+    const signature = entityIds.join("\n");
+    if (signature === this._entityListSignature) return;
+    this._entityListSignature = signature;
+    const optionCache = new Map();
     this.shadowRoot.querySelectorAll("datalist").forEach((list) => {
       const input = this.shadowRoot.querySelector(`[list="${list.id}"]`);
-      list.innerHTML = this._entityOptions(input?.dataset.domain || "");
+      const domain = input?.dataset.domain || "";
+      if (!optionCache.has(domain)) optionCache.set(domain, this._entityOptions(domain));
+      list.innerHTML = optionCache.get(domain);
     });
   }
 

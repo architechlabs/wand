@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import asyncio
 import logging
+from pathlib import Path
 from typing import Any
 
+import voluptuous as vol
+
+from homeassistant.auth.permissions.const import POLICY_CONTROL
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
+from homeassistant.const import ATTR_ENTITY_ID, Platform
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.entity_component import async_update_entity
 from homeassistant.helpers.typing import ConfigType
 
 from .const import CARD_FILENAME, CARD_URL, DOMAIN, STATIC_URL_PATH, VERSION
@@ -108,9 +114,37 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 service_data,
                 target=target,
                 blocking=False,
+                context=call.context,
             )
 
         hass.services.async_register(DOMAIN, "call_action", _async_call_action)
+
+    if not hass.services.has_service(DOMAIN, "refresh_entities"):
+
+        async def _async_refresh_entities(call: ServiceCall) -> None:
+            """Refresh only entities the calling user is allowed to control."""
+            entity_ids: list[str] = list(dict.fromkeys(call.data[ATTR_ENTITY_ID]))
+            if call.context.user_id:
+                user = await hass.auth.async_get_user(call.context.user_id)
+                if user is None:
+                    return
+                entity_ids = [
+                    entity_id
+                    for entity_id in entity_ids
+                    if user.permissions.check_entity(entity_id, POLICY_CONTROL)
+                ]
+
+            await asyncio.gather(
+                *(async_update_entity(hass, entity_id) for entity_id in entity_ids),
+                return_exceptions=True,
+            )
+
+        hass.services.async_register(
+            DOMAIN,
+            "refresh_entities",
+            _async_refresh_entities,
+            schema=vol.Schema({vol.Required(ATTR_ENTITY_ID): cv.entity_ids}),
+        )
 
     if hass.services.has_service(DOMAIN, "reload_frontend"):
         return
