@@ -18,6 +18,33 @@ A Home Assistant custom integration plus Lovelace card for building polished, re
 
 ## Install in Home Assistant
 
+### Dashboard-only refresh (no custom component or restart)
+
+Pure HACS/frontend installs can let normal users refresh integrations through one local webhook automation. Wand sends every entity already configured in the selected room, so the automation does not need a duplicate device list.
+
+Create an automation, open its YAML editor, and use the following configuration. Replace the webhook ID with your own long, random value:
+
+```yaml
+alias: Wand dashboard refresh bridge
+description: Reload integrations requested by the Wand dashboard card.
+mode: queued
+max: 3
+trigger:
+  - platform: webhook
+    webhook_id: REPLACE_WITH_A_LONG_RANDOM_ID
+    allowed_methods:
+      - POST
+    local_only: true
+action:
+  - service: homeassistant.reload_config_entry
+    target:
+      entity_id: "{{ trigger.json.entities }}"
+```
+
+In the Wand visual editor, open **Dashboard-only refresh** and enter the same webhook ID. The refresh button will then use the automation before trying any backend service. No Home Assistant restart is required.
+
+Treat the webhook ID like a password and keep `local_only` enabled. Anyone who knows the ID and can reach the endpoint can trigger this reload automation.
+
 ### Integration install
 
 Copy `custom_components/wand_remote` into:
@@ -38,14 +65,14 @@ If the card does not appear in the picker, add the frontend resource manually:
 
 ```text
 Settings -> Dashboards -> three dots -> Resources -> Add Resource
-URL: /wand_remote/wand-remote-card.js?v=0.10.5
+URL: /wand_remote/wand-remote-card.js?v=0.11.0
 Resource type: JavaScript module
 ```
 
 Then hard refresh the browser and reopen the card picker. You can also test whether the file is being served by opening:
 
 ```text
-http://YOUR_HA_ADDRESS:8123/wand_remote/wand-remote-card.js?v=0.10.5
+http://YOUR_HA_ADDRESS:8123/wand_remote/wand-remote-card.js?v=0.11.0
 ```
 
 If that URL returns 404, the integration has not been added in **Devices & services** or Home Assistant has not restarted after installation.

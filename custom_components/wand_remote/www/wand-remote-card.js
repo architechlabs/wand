@@ -1,4 +1,4 @@
-const VERSION = "0.10.5";
+const VERSION = "0.11.0";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -17,6 +17,7 @@ const DEFAULT_CONFIG = {
   show_now_controlling: true,
   show_unavailable_devices: true,
   persist_navigation: true,
+  refresh_webhook_id: "",
   use_universal_remote_card: true,
   universal_remote_card_type: "custom:universal-remote-card",
   rooms: [
@@ -759,19 +760,35 @@ class WandRemoteCard extends HTMLElement {
 
   async _refreshRoom(room, device = this._currentDevice()) {
     if (!room || !this._hass) return;
-    if (room.refresh_action) {
-      await this._runAction(room.refresh_action);
-      return;
-    }
-    if (device?.refresh_action) {
-      await this._runAction(device.refresh_action);
-      return;
-    }
-
     const entities = [...new Set((room.devices || [])
       .flatMap((item) => [item.remote_id, item.media_player_id, item.power_entity, item.source_entity_id, ...(item.availability_entities || [])])
       .filter(Boolean))];
+    const actionVariables = {
+      wand_entities: entities,
+      wand_room_id: room.id,
+      wand_device_id: device?.id || ""
+    };
+
+    if (room.refresh_action) {
+      await this._runAction(room.refresh_action, actionVariables);
+      return;
+    }
+    if (device?.refresh_action) {
+      await this._runAction(device.refresh_action, actionVariables);
+      return;
+    }
+
     if (!entities.length) return;
+
+    if (this._config.refresh_webhook_id) {
+      await this._callRefreshWebhook(this._config.refresh_webhook_id, entities, room, device);
+      this.dispatchEvent(new CustomEvent("hass-notification", {
+        detail: { message: "Remote integration refresh requested." },
+        bubbles: true,
+        composed: true
+      }));
+      return;
+    }
 
     // Service metadata can be hidden from normal users even while the service is
     // callable, so invoke the permission-scoped Wand backend directly.
@@ -790,6 +807,28 @@ class WandRemoteCard extends HTMLElement {
       bubbles: true,
       composed: true
     }));
+  }
+
+  async _callRefreshWebhook(webhookId, entities, room, device) {
+    const path = `/api/webhook/${encodeURIComponent(String(webhookId).trim())}`;
+    const url = typeof this._hass?.hassUrl === "function" ? this._hass.hassUrl(path) : path;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 20000);
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          entities,
+          room_id: room.id,
+          device_id: device?.id || ""
+        }),
+        signal: controller.signal
+      });
+      if (!response.ok) throw new Error(`Webhook returned HTTP ${response.status}`);
+    } finally {
+      window.clearTimeout(timeout);
+    }
   }
 
   async _selectDevice(device, room) {
@@ -867,13 +906,20 @@ class WandRemoteCard extends HTMLElement {
     await this._hass?.callService("homeassistant", mode === "on" ? "turn_on" : "turn_off", { entity_id: target });
   }
 
-  async _runAction(action) {
+  async _runAction(action, variables = null) {
     if (!this._hass || !action) return;
     const normalized = typeof action === "string" ? { service: action } : action;
     if (!normalized.service) return;
     const [domain, service] = normalized.service.split(".");
     if (!domain || !service) return;
-    await this._hass.callService(domain, service, normalized.service_data || {}, normalized.target);
+    let serviceData = normalized.service_data || {};
+    if (variables && domain === "script" && service === "turn_on") {
+      serviceData = {
+        ...serviceData,
+        variables: { ...(serviceData.variables || {}), ...variables }
+      };
+    }
+    await this._hass.callService(domain, service, serviceData, normalized.target);
   }
 
   async _callFallbackAction(device, actionKey) {
@@ -1066,6 +1112,11 @@ class WandRemoteCardEditor extends HTMLElement {
               ${this._toggle("persist_navigation", "Remember selected area")}
             </div>
             <label>Remote card type<input data-root="universal_remote_card_type" value="${this._escape(this._config.universal_remote_card_type || "custom:universal-remote-card")}"></label>
+          </details>
+          <details>
+            <summary>Dashboard-only refresh</summary>
+            <div class="notice">Optional: enter the ID of a local webhook automation. Wand will send this room's configured entities automatically, so refresh works for normal users without the Wand backend integration or an HA restart.</div>
+            <label>Refresh webhook ID<input data-root="refresh_webhook_id" value="${this._escape(this._config.refresh_webhook_id || "")}" autocomplete="off" placeholder="Use a long, random webhook ID"></label>
           </details>
         </section>
 

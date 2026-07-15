@@ -26,15 +26,15 @@ ATTR_REFRESH_ENTITIES = "entities"
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the integration from YAML, if present."""
-    await _async_register_frontend(hass)
     _async_register_services(hass)
+    await _async_setup_frontend_safely(hass)
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Wand Universal Remote from a config entry."""
-    await _async_register_frontend(hass)
     _async_register_services(hass)
+    await _async_setup_frontend_safely(hass)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = entry.data | {"options": entry.options}
     return True
 
@@ -43,6 +43,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
     return True
+
+
+async def _async_setup_frontend_safely(hass: HomeAssistant) -> None:
+    """Keep frontend registration failures from disabling backend services."""
+    try:
+        await _async_register_frontend(hass)
+    except Exception:
+        LOGGER.exception(
+            "Wand frontend registration failed; backend services remain available"
+        )
 
 
 async def _async_register_frontend(hass: HomeAssistant) -> None:
@@ -194,6 +204,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             _async_refresh_entities,
             schema=vol.Schema({vol.Required(ATTR_REFRESH_ENTITIES): cv.entity_ids}),
         )
+        LOGGER.info("Wand refresh service registered: %s.refresh_entities", DOMAIN)
 
     if hass.services.has_service(DOMAIN, "reload_frontend"):
         return
