@@ -1,0 +1,20 @@
+alias: Wand dashboard refresh bridge
+description: Reload integrations requested by the Wand dashboard card.
+mode: queued
+max: 3
+trigger:
+  - platform: webhook
+    webhook_id: REPLACE_WITH_A_LONG_RANDOM_ID
+    allowed_methods:
+      - POST
+    local_only: true
+condition:
+  - condition: template
+    value_template: >-
+      {{ trigger.json is defined
+         and trigger.json.entities is defined
+         and (trigger.json.entities | count) > 0 }}
+action:
+  - service: homeassistant.reload_config_entry
+    target:
+      entity_id: "{{ trigger.json.entities | list }}"

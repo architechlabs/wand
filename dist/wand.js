@@ -1,4 +1,4 @@
-const VERSION = "0.11.0";
+const VERSION = "0.11.1";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -215,6 +215,7 @@ class WandRemoteCard extends HTMLElement {
 
   _normalizeConfig(config) {
     const merged = { ...clone(DEFAULT_CONFIG), ...clone(config || {}) };
+    merged.refresh_webhook_id = String(merged.refresh_webhook_id || "").trim();
     merged.rooms = (merged.rooms || []).map((room) => ({
       id: room.id || slug(room.name),
       name: room.name || "Room",
@@ -769,6 +770,16 @@ class WandRemoteCard extends HTMLElement {
       wand_device_id: device?.id || ""
     };
 
+    if (this._config.refresh_webhook_id && entities.length) {
+      await this._callRefreshWebhook(this._config.refresh_webhook_id, entities, room, device);
+      this.dispatchEvent(new CustomEvent("hass-notification", {
+        detail: { message: "Remote integration refresh requested." },
+        bubbles: true,
+        composed: true
+      }));
+      return;
+    }
+
     if (room.refresh_action) {
       await this._runAction(room.refresh_action, actionVariables);
       return;
@@ -779,16 +790,6 @@ class WandRemoteCard extends HTMLElement {
     }
 
     if (!entities.length) return;
-
-    if (this._config.refresh_webhook_id) {
-      await this._callRefreshWebhook(this._config.refresh_webhook_id, entities, room, device);
-      this.dispatchEvent(new CustomEvent("hass-notification", {
-        detail: { message: "Remote integration refresh requested." },
-        bubbles: true,
-        composed: true
-      }));
-      return;
-    }
 
     // Service metadata can be hidden from normal users even while the service is
     // callable, so invoke the permission-scoped Wand backend directly.
@@ -810,7 +811,9 @@ class WandRemoteCard extends HTMLElement {
   }
 
   async _callRefreshWebhook(webhookId, entities, room, device) {
-    const path = `/api/webhook/${encodeURIComponent(String(webhookId).trim())}`;
+    const normalizedId = String(webhookId || "").trim();
+    if (!normalizedId) throw new Error("Refresh webhook ID is empty");
+    const path = `/api/webhook/${encodeURIComponent(normalizedId)}`;
     const url = typeof this._hass?.hassUrl === "function" ? this._hass.hassUrl(path) : path;
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 20000);
@@ -823,9 +826,13 @@ class WandRemoteCard extends HTMLElement {
           room_id: room.id,
           device_id: device?.id || ""
         }),
+        cache: "no-store",
+        credentials: "omit",
         signal: controller.signal
       });
-      if (!response.ok) throw new Error(`Webhook returned HTTP ${response.status}`);
+      if (!response.ok) {
+        throw new Error(`Webhook ${normalizedId} returned HTTP ${response.status}`);
+      }
     } finally {
       window.clearTimeout(timeout);
     }
@@ -1115,7 +1122,7 @@ class WandRemoteCardEditor extends HTMLElement {
           </details>
           <details>
             <summary>Dashboard-only refresh</summary>
-            <div class="notice">Optional: enter the ID of a local webhook automation. Wand will send this room's configured entities automatically, so refresh works for normal users without the Wand backend integration or an HA restart.</div>
+            <div class="notice">Optional: enter the ID of a local webhook automation. Wand sends this room's configured entities automatically. While this field is set, it overrides area/device refresh actions and does not require the Wand backend integration or an HA restart.</div>
             <label>Refresh webhook ID<input data-root="refresh_webhook_id" value="${this._escape(this._config.refresh_webhook_id || "")}" autocomplete="off" placeholder="Use a long, random webhook ID"></label>
           </details>
         </section>

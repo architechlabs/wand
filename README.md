@@ -22,7 +22,11 @@ A Home Assistant custom integration plus Lovelace card for building polished, re
 
 Pure HACS/frontend installs can let normal users refresh integrations through one local webhook automation. Wand sends every entity already configured in the selected room, so the automation does not need a duplicate device list.
 
-Create an automation, open its YAML editor, and use the following configuration. Replace the webhook ID with your own long, random value:
+1. In Home Assistant, open **Settings -> Automations & scenes -> Create automation -> Create new automation**.
+2. Open the three-dot menu and select **Edit in YAML**.
+3. Replace the generated automation with the YAML below.
+4. Replace `REPLACE_WITH_A_LONG_RANDOM_ID` with a private random value, for example `wand_refresh_7f8c2e91b64a43d8a0f559e91bcd742a`.
+5. Save the automation. You do not need to restart Home Assistant.
 
 ```yaml
 alias: Wand dashboard refresh bridge
@@ -35,13 +39,33 @@ trigger:
     allowed_methods:
       - POST
     local_only: true
+condition:
+  - condition: template
+    value_template: >-
+      {{ trigger.json is defined
+         and trigger.json.entities is defined
+         and (trigger.json.entities | count) > 0 }}
 action:
   - service: homeassistant.reload_config_entry
     target:
-      entity_id: "{{ trigger.json.entities }}"
+      entity_id: "{{ trigger.json.entities | list }}"
 ```
 
-In the Wand visual editor, open **Dashboard-only refresh** and enter the same webhook ID. The refresh button will then use the automation before trying any backend service. No Home Assistant restart is required.
+The same template is available at [`examples/wand-dashboard-refresh-automation.yaml`](examples/wand-dashboard-refresh-automation.yaml).
+
+Next, configure the card:
+
+1. Edit the Wand dashboard card.
+2. Open **Dashboard-only refresh**.
+3. Paste only the webhook ID into **Refresh webhook ID**. Do not paste the URL or `/api/webhook/`.
+4. Click outside the field so Home Assistant records the change, then save the card.
+5. Open the card as a normal user and press refresh.
+
+When the webhook ID is configured, it takes priority over old area/device refresh actions. Wand automatically posts the selected room's `remote`, `media_player`, power, source, and availability entities. A successful request shows **Remote integration refresh requested**.
+
+To verify it, open the automation and inspect **Traces** after pressing refresh. The trace should contain the entities received in `trigger.json.entities`.
+
+If the card reports HTTP `404`, the two webhook IDs do not match or the automation is disabled. HTTP `405` means POST is not enabled in the webhook trigger.
 
 Treat the webhook ID like a password and keep `local_only` enabled. Anyone who knows the ID and can reach the endpoint can trigger this reload automation.
 
@@ -65,14 +89,14 @@ If the card does not appear in the picker, add the frontend resource manually:
 
 ```text
 Settings -> Dashboards -> three dots -> Resources -> Add Resource
-URL: /wand_remote/wand-remote-card.js?v=0.11.0
+URL: /wand_remote/wand-remote-card.js?v=0.11.1
 Resource type: JavaScript module
 ```
 
 Then hard refresh the browser and reopen the card picker. You can also test whether the file is being served by opening:
 
 ```text
-http://YOUR_HA_ADDRESS:8123/wand_remote/wand-remote-card.js?v=0.11.0
+http://YOUR_HA_ADDRESS:8123/wand_remote/wand-remote-card.js?v=0.11.1
 ```
 
 If that URL returns 404, the integration has not been added in **Devices & services** or Home Assistant has not restarted after installation.
