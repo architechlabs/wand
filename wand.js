@@ -1,4 +1,4 @@
-const VERSION = "0.11.1";
+const VERSION = "0.11.2";
 
 const DEFAULT_REMOTE_ROWS = [
   ["back", "power", "home", "menu"],
@@ -29,6 +29,7 @@ const DEFAULT_CONFIG = {
       source_entity_id: "",
       show_power_button: true,
       show_refresh_button: true,
+      refresh_webhook_id: "",
       power_on_action: null,
       power_off_action: null,
       refresh_action: null,
@@ -224,6 +225,7 @@ class WandRemoteCard extends HTMLElement {
       source_entity_id: room.source_entity_id || "",
       show_power_button: room.show_power_button ?? true,
       show_refresh_button: room.show_refresh_button ?? true,
+      refresh_webhook_id: String(room.refresh_webhook_id || "").trim(),
       power_on_action: room.power_on_action || null,
       power_off_action: room.power_off_action || null,
       refresh_action: room.refresh_action || null,
@@ -769,9 +771,10 @@ class WandRemoteCard extends HTMLElement {
       wand_room_id: room.id,
       wand_device_id: device?.id || ""
     };
+    const webhookId = room.refresh_webhook_id || this._config.refresh_webhook_id;
 
-    if (this._config.refresh_webhook_id && entities.length) {
-      await this._callRefreshWebhook(this._config.refresh_webhook_id, entities, room, device);
+    if (webhookId && entities.length) {
+      await this._callRefreshWebhook(webhookId, entities, room, device);
       this.dispatchEvent(new CustomEvent("hass-notification", {
         detail: { message: "Remote integration refresh requested." },
         bubbles: true,
@@ -1101,6 +1104,7 @@ class WandRemoteCardEditor extends HTMLElement {
         <section class="editor-card">
           <div class="section-title">
             <div><h3>Basics</h3><p>Choose how the remote appears and behaves.</p></div>
+            <span class="version">Wand v${VERSION}</span>
           </div>
           <div class="field-grid two">
             <label>Title<input data-root="title" value="${this._escape(this._config.title || "")}"></label>
@@ -1122,8 +1126,8 @@ class WandRemoteCardEditor extends HTMLElement {
           </details>
           <details>
             <summary>Dashboard-only refresh</summary>
-            <div class="notice">Optional: enter the ID of a local webhook automation. Wand sends this room's configured entities automatically. While this field is set, it overrides area/device refresh actions and does not require the Wand backend integration or an HA restart.</div>
-            <label>Refresh webhook ID<input data-root="refresh_webhook_id" value="${this._escape(this._config.refresh_webhook_id || "")}" autocomplete="off" placeholder="Use a long, random webhook ID"></label>
+            <div class="notice">Optional default for every area. An area-specific webhook in Area header controls overrides this value.</div>
+            <label>Default webhook ID<input data-root="refresh_webhook_id" value="${this._escape(this._config.refresh_webhook_id || "")}" autocomplete="off" placeholder="Use a long, random webhook ID"></label>
           </details>
         </section>
 
@@ -1180,6 +1184,8 @@ class WandRemoteCardEditor extends HTMLElement {
             <label class="check"><input type="checkbox" data-room-check="show_power_button" ${room.show_power_button !== false ? "checked" : ""}> Show power button</label>
             <label class="check"><input type="checkbox" data-room-check="show_refresh_button" ${room.show_refresh_button !== false ? "checked" : ""}> Show refresh button</label>
           </div>
+          <div class="notice">Dashboard-only refresh: paste the automation's webhook ID here. This area sends its configured entities automatically and this value overrides refresh scripts below.</div>
+          <label>Area refresh webhook ID<input data-room="refresh_webhook_id" value="${this._escape(room.refresh_webhook_id || "")}" autocomplete="off" placeholder="Leave blank to use the default webhook"></label>
           ${this._scriptPicker("room-refresh", "Refresh script", room.refresh_action)}
           ${this._actionEditor("room-power-on", "Power on script/service", room.power_on_action)}
           ${this._actionEditor("room-power-off", "Power off script/service", room.power_off_action)}
@@ -1508,7 +1514,7 @@ class WandRemoteCardEditor extends HTMLElement {
 
   _updateRoom(input) {
     const room = this._room();
-    room[input.dataset.room] = input.value;
+    room[input.dataset.room] = input.dataset.room === "refresh_webhook_id" ? input.value.trim() : input.value;
     if (input.dataset.room === "name") room.id = slug(input.value);
     this._changed();
   }
@@ -1704,6 +1710,7 @@ class WandRemoteCardEditor extends HTMLElement {
       source_entity_id: "",
       show_power_button: true,
       show_refresh_button: true,
+      refresh_webhook_id: "",
       power_on_action: null,
       power_off_action: null,
       refresh_action: null,
@@ -1777,6 +1784,7 @@ class WandRemoteCardEditor extends HTMLElement {
       .section-title { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
       .section-title h3 { margin:0 0 4px; }
       .section-title p { margin:0; color:var(--secondary-text-color); font-size:12px; line-height:1.35; }
+      .version { flex:0 0 auto; padding:5px 8px; border:1px solid var(--divider-color); border-radius:999px; color:var(--secondary-text-color); font-size:11px; font-weight:800; }
       h3 { margin:0; font-size:14px; letter-spacing:0; }
       label { display:grid; gap:6px; font-size:12px; font-weight:700; color:var(--secondary-text-color); }
       input, select, textarea { width:100%; min-height:40px; border:1px solid var(--divider-color); border-radius:10px; padding:9px 10px; background:var(--card-background-color); color:var(--primary-text-color); font:inherit; }
@@ -1804,7 +1812,7 @@ class WandRemoteCardEditor extends HTMLElement {
       summary::-webkit-details-marker { display:none; }
       summary::after { content:"+"; float:right; color:var(--secondary-text-color); }
       details[open] > summary::after { content:"-"; }
-      details > label, details > .toggles, details > .rows-builder, details > .nested-editor { margin:0 10px; }
+      details > label, details > .toggles, details > .rows-builder, details > .nested-editor, details > .notice { margin:0 10px; }
       .sub-details { background:transparent; }
       details label { margin-top:10px; }
     `;

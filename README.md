@@ -56,12 +56,14 @@ The same template is available at [`examples/wand-dashboard-refresh-automation.y
 Next, configure the card:
 
 1. Edit the Wand dashboard card.
-2. Open **Dashboard-only refresh**.
-3. Paste only the webhook ID into **Refresh webhook ID**. Do not paste the URL or `/api/webhook/`.
-4. Click outside the field so Home Assistant records the change, then save the card.
-5. Open the card as a normal user and press refresh.
+2. Confirm the top of the editor shows **Wand v0.11.2**. If it does not, update the dashboard resource and hard-refresh the browser.
+3. Select the area you want to configure, then open **Area header controls** (the same section containing **Show refresh button**).
+4. Paste only the webhook ID into **Area refresh webhook ID**. Do not paste the URL or `/api/webhook/`.
+5. Repeat for another area only if it should use a different automation. To use one webhook for every area, leave the area fields blank and enter it once under **Basics -> Dashboard-only refresh -> Default webhook ID**.
+6. Click outside the field so Home Assistant records the change, then save the card.
+7. Open the card as a normal user and press refresh.
 
-When the webhook ID is configured, it takes priority over old area/device refresh actions. Wand automatically posts the selected room's `remote`, `media_player`, power, source, and availability entities. A successful request shows **Remote integration refresh requested**.
+An area webhook overrides the global default and any old area/device refresh action. Wand automatically posts the selected room's `remote`, `media_player`, power, source, and availability entities. A successful request shows **Remote integration refresh requested**.
 
 To verify it, open the automation and inspect **Traces** after pressing refresh. The trace should contain the entities received in `trigger.json.entities`.
 
@@ -89,14 +91,14 @@ If the card does not appear in the picker, add the frontend resource manually:
 
 ```text
 Settings -> Dashboards -> three dots -> Resources -> Add Resource
-URL: /wand_remote/wand-remote-card.js?v=0.11.1
+URL: /wand_remote/wand-remote-card.js?v=0.11.2
 Resource type: JavaScript module
 ```
 
 Then hard refresh the browser and reopen the card picker. You can also test whether the file is being served by opening:
 
 ```text
-http://YOUR_HA_ADDRESS:8123/wand_remote/wand-remote-card.js?v=0.11.1
+http://YOUR_HA_ADDRESS:8123/wand_remote/wand-remote-card.js?v=0.11.2
 ```
 
 If that URL returns 404, the integration has not been added in **Devices & services** or Home Assistant has not restarted after installation.
